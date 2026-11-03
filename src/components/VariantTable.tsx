@@ -104,16 +104,18 @@ export const VariantTable: React.FC<VariantTableProps> = ({
       const containerRect = container.getBoundingClientRect();
       const thRect = targetTh.getBoundingClientRect();
 
-      const padding = 24; // breathing room in px so adjacent column is slightly previewed
+      const halfScreen = Math.floor(container.clientWidth / 2);
 
       if (thRect.left < containerRect.left) {
-        // Selection cursor moved outside the viewport to the left
-        const diff = containerRect.left - thRect.left;
-        container.scrollLeft = Math.max(0, container.scrollLeft - diff - padding);
+        // Selection cursor moved beyond the left edge of viewport: scroll half screen to the left
+        const cellLeftInContainer = container.scrollLeft + (thRect.left - containerRect.left);
+        const targetScroll = Math.max(0, Math.min(container.scrollLeft - halfScreen, cellLeftInContainer - 16));
+        container.scrollLeft = targetScroll;
       } else if (thRect.right > containerRect.right) {
-        // Selection cursor moved outside the viewport to the right
-        const diff = thRect.right - containerRect.right;
-        container.scrollLeft += diff + padding;
+        // Selection cursor moved beyond the right edge of viewport: scroll half screen to the right
+        const cellRightInContainer = container.scrollLeft + (thRect.right - containerRect.left);
+        const targetScroll = Math.max(container.scrollLeft + halfScreen, cellRightInContainer - container.clientWidth + 16);
+        container.scrollLeft = targetScroll;
       }
     };
 

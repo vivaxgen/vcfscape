@@ -121,6 +121,15 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertEqual(split_view.fixed_table.peer_table, split_view.sample_table)
         self.assertEqual(split_view.sample_table.peer_table, split_view.fixed_table)
 
+    def test_sample_table_horizontal_scroll(self):
+        sample_table = self.app.table_widget.sample_table
+        self.assertEqual(sample_table.id, "sample_table")
+        self.assertTrue(hasattr(sample_table, "action_cursor_left"))
+        self.assertTrue(hasattr(sample_table, "action_cursor_right"))
+        self.assertTrue(hasattr(sample_table, "scroll_column_half_screen"))
+        self.assertTrue(hasattr(sample_table, "_get_column_bounds"))
+        self.assertTrue(hasattr(sample_table, "_get_viewport_width"))
+
 
 if __name__ == "__main__":
     unittest.main()

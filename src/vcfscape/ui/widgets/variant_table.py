@@ -58,13 +58,17 @@ class FixedVariantTable(DataTable):
 
     def action_cursor_left(self) -> None:
         if self.scroll_x > 0:
-            self.scroll_left(animate=False)
+            vp_width = getattr(self.scrollable_content_region, "width", 0) or getattr(self.size, "width", 40) or 40
+            half_screen = max(1, vp_width // 2)
+            self.scroll_to(x=max(0, self.scroll_x - half_screen), animate=False, force=True)
         else:
             super().action_cursor_left()
 
     def action_cursor_right(self) -> None:
         if self.scroll_x < self.max_scroll_x:
-            self.scroll_right(animate=False)
+            vp_width = getattr(self.scrollable_content_region, "width", 0) or getattr(self.size, "width", 40) or 40
+            half_screen = max(1, vp_width // 2)
+            self.scroll_to(x=min(self.max_scroll_x, self.scroll_x + half_screen), animate=False, force=True)
         else:
             super().action_cursor_right()
 
@@ -98,6 +102,101 @@ class SampleMatrixTable(DataTable):
         self.scroll_up(animate=False)
         if self.peer_table is not None:
             self.peer_table.scroll_to(y=self.scroll_y, animate=False, force=True)
+
+    def _get_column_bounds(self, col_idx: int) -> Tuple[int, int]:
+        """Compute the horizontal range (col_left, col_right) in content coordinates."""
+        try:
+            if hasattr(self, "_get_cell_region"):
+                coord = getattr(self, "cursor_coordinate", None)
+                if coord is not None:
+                    reg = self._get_cell_region(coord)
+                    return reg.x, reg.x + reg.width
+        except Exception:
+            pass
+
+        col_left = 0
+        col_width = 8
+        try:
+            cols = list(self.columns.values())
+            if 0 <= col_idx < len(cols):
+                col_left = sum(c.width for c in cols[:col_idx])
+                col_width = cols[col_idx].width
+        except Exception:
+            col_left = col_idx * 8
+            col_width = 8
+        return col_left, col_left + col_width
+
+    def _get_viewport_width(self) -> int:
+        """Get the visible content viewport width."""
+        if hasattr(self, "scrollable_content_region") and self.scrollable_content_region.width > 0:
+            return self.scrollable_content_region.width
+        if hasattr(self, "content_size") and self.content_size.width > 0:
+            return self.content_size.width
+        return getattr(self.size, "width", 80) or 80
+
+    def scroll_column_half_screen(self, col_idx: int) -> None:
+        """Scroll container half screen if cursor column moves beyond viewport edges."""
+        vp_width = self._get_viewport_width()
+        half_screen = max(1, vp_width // 2)
+        scroll_x = getattr(self, "scroll_x", 0)
+        viewport_left = scroll_x
+        viewport_right = scroll_x + vp_width
+
+        col_left, col_right = self._get_column_bounds(col_idx)
+
+        if col_idx == 0:
+            self.scroll_to(x=0, animate=False, force=True)
+            return
+
+        if col_right > viewport_right:
+            # Cursor moved beyond the right edge: scroll half screen to the right
+            target_x = scroll_x + half_screen
+            target_x = max(target_x, col_right - vp_width + 2)
+            self.scroll_to(x=target_x, animate=False, force=True)
+        elif col_left < viewport_left:
+            # Cursor moved beyond the left edge: scroll half screen to the left
+            target_x = max(0, scroll_x - half_screen)
+            target_x = min(target_x, col_left)
+            self.scroll_to(x=target_x, animate=False, force=True)
+
+    def action_cursor_right(self) -> None:
+        old_scroll_x = getattr(self, "scroll_x", 0)
+        vp_width = self._get_viewport_width()
+        viewport_right = old_scroll_x + vp_width
+
+        super().action_cursor_right()
+
+        new_coord = getattr(self, "cursor_coordinate", None)
+        new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
+        col_left, col_right = self._get_column_bounds(new_col)
+
+        if col_right > viewport_right or getattr(self, "scroll_x", 0) > old_scroll_x:
+            half_screen = max(1, vp_width // 2)
+            target_x = old_scroll_x + half_screen
+            target_x = max(target_x, col_right - vp_width + 2)
+            self.scroll_to(x=target_x, animate=False, force=True)
+
+    def action_cursor_left(self) -> None:
+        old_scroll_x = getattr(self, "scroll_x", 0)
+        vp_width = self._get_viewport_width()
+        viewport_left = old_scroll_x
+
+        super().action_cursor_left()
+
+        new_coord = getattr(self, "cursor_coordinate", None)
+        new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
+
+        if new_col == 0:
+            self.scroll_to(x=0, animate=False, force=True)
+            return
+
+        col_left, col_right = self._get_column_bounds(new_col)
+
+        if col_left < viewport_left or getattr(self, "scroll_x", 0) < old_scroll_x:
+            half_screen = max(1, vp_width // 2)
+            target_x = max(0, old_scroll_x - half_screen)
+            target_x = min(target_x, col_left)
+            self.scroll_to(x=target_x, animate=False, force=True)
 
 
 class VariantSplitView(Widget):
@@ -320,6 +419,7 @@ class VariantSplitView(Widget):
             if self.current_row_idx != target_row or self.current_sample_idx != target_col:
                 self.current_row_idx = target_row
                 self.current_sample_idx = target_col
+                self.sample_table.scroll_column_half_screen(target_col)
                 self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int):
