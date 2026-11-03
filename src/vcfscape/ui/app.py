@@ -166,14 +166,20 @@ class VcfscapeApp(App):
         """Toggle between Dark and Light mode."""
         if "theme-light" in self.classes:
             self.remove_class("theme-light")
-            if self.screen:
-                self.screen.remove_class("theme-light")
+            try:
+                if self.screen:
+                    self.screen.remove_class("theme-light")
+            except Exception:
+                pass
             self.dark = True
             self.footer_bar.set_log("Switched theme to [DARK] mode.")
         else:
             self.add_class("theme-light")
-            if self.screen:
-                self.screen.add_class("theme-light")
+            try:
+                if self.screen:
+                    self.screen.add_class("theme-light")
+            except Exception:
+                pass
             self.dark = False
             self.footer_bar.set_log("Switched theme to [LIGHT] mode.")
 

@@ -218,11 +218,45 @@ class VariantSplitView(Widget):
     view_mode = reactive("normal")
     format_tag = reactive("GT")
 
+    DEFAULT_CSS = """
+    VariantSplitView {
+        width: 1fr;
+        height: 1fr;
+        layout: horizontal;
+    }
+
+    #split_container {
+        width: 1fr;
+        height: 100%;
+        layout: horizontal;
+    }
+
+    #fixed_table {
+        height: 100%;
+        background: #0b0f17;
+    }
+
+    #table_divider {
+        width: 1;
+        min-width: 1;
+        max-width: 1;
+        height: 100%;
+        color: #334155;
+        background: #0b0f17;
+    }
+
+    #sample_table {
+        width: 1fr;
+        height: 100%;
+        background: #0b0f17;
+    }
+    """
+
     FIXED_WIDTHS = {
-        "essential": 18,
-        "compact": 28,
-        "normal": 48,
-        "raw": 70,
+        "essential": 16,
+        "compact": 24,
+        "normal": 38,
+        "raw": 62,
     }
 
     def __init__(
@@ -243,11 +277,17 @@ class VariantSplitView(Widget):
         self.fixed_table = FixedVariantTable(id="fixed_table", cursor_type="row", zebra_stripes=True)
         self.fixed_table.show_cursor = True
 
-        # 2. Divider
+        # 2. Divider - locked to 1 column width to prevent pushing sample_table off-screen
         self.divider = Static("│", id="table_divider")
+        self.divider.styles.width = 1
+        self.divider.styles.min_width = 1
+        self.divider.styles.max_width = 1
+        self.divider.styles.height = "100%"
 
         # 3. Right Horizontally Scrollable Sample Table
         self.sample_table = SampleMatrixTable(id="sample_table", cursor_type="cell", zebra_stripes=True)
+        self.sample_table.styles.width = "1fr"
+        self.sample_table.styles.height = "100%"
         self.sample_table.show_cursor = True
 
         # Link peers directly

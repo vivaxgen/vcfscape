@@ -243,12 +243,15 @@ class CohortManagerScreen(ModalScreen[bool]):
         return f"Selected Samples: {selected} / {total} ({pct:.1f}% of dataset){term_note}"
 
     def _refresh_sample_list(self):
-        checklist = self.query_one("#sample_checklist", SelectionList)
-        checklist.clear_options()
-        checklist.add_options(self._build_selection_items())
-        
-        summary = self.query_one("#selection_summary", Static)
-        summary.update(self._build_summary_text())
+        try:
+            checklist = self.query_one("#sample_checklist", SelectionList)
+            checklist.clear_options()
+            checklist.add_options(self._build_selection_items())
+            
+            summary = self.query_one("#selection_summary", Static)
+            summary.update(self._build_summary_text())
+        except Exception:
+            pass
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "cohort_selector":
@@ -375,6 +378,12 @@ class CohortManagerScreen(ModalScreen[bool]):
         else:
             status.update(f"Could not delete cohort '{target}'.")
 
+    def _set_status(self, text: str):
+        try:
+            self.query_one("#status_message", Static).update(text)
+        except Exception:
+            pass
+
     def action_select_all(self):
         """Select all visible or all samples."""
         term = self.search_filter.strip().lower()
@@ -382,7 +391,7 @@ class CohortManagerScreen(ModalScreen[bool]):
             if not term or term in s.lower():
                 self.selected_samples.add(s)
         self._refresh_sample_list()
-        self.query_one("#status_message", Static).update("Selected all matching samples.")
+        self._set_status("Selected all matching samples.")
 
     def action_deselect_all(self):
         term = self.search_filter.strip().lower()
@@ -393,7 +402,7 @@ class CohortManagerScreen(ModalScreen[bool]):
         else:
             self.selected_samples.clear()
         self._refresh_sample_list()
-        self.query_one("#status_message", Static).update("Cleared sample selections.")
+        self._set_status("Cleared sample selections.")
 
     def action_invert_selection(self):
         """Invert selection: flips current selection across entire sample list."""
@@ -401,7 +410,7 @@ class CohortManagerScreen(ModalScreen[bool]):
             self.cohort_manager.invert_selection(list(self.selected_samples))
         )
         self._refresh_sample_list()
-        self.query_one("#status_message", Static).update(
+        self._set_status(
             f"Inverted sample selection: now {len(self.selected_samples)} selected."
         )
 

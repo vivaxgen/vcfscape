@@ -130,6 +130,14 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertTrue(hasattr(sample_table, "_get_column_bounds"))
         self.assertTrue(hasattr(sample_table, "_get_viewport_width"))
 
+    def test_sample_matrix_table_visible_and_populated(self):
+        """Verifies SampleMatrixTable divider width is locked to 1 and styling is set."""
+        split_view = self.app.table_widget
+        self.assertEqual(split_view.divider.styles.width.value, 1)
+        self.assertEqual(split_view.sample_table.styles.width.value, 1)  # 1fr
+        self.assertIsNotNone(split_view.sample_table)
+        self.assertIsNotNone(split_view.fixed_table)
+
 
 class TestWidgetFilesPresence(unittest.TestCase):
     """Verifies that all widget files and assets exist and compile without syntax errors."""

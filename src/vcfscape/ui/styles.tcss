@@ -24,19 +24,38 @@ VariantSplitView {
     layout: horizontal;
 }
 
-FixedVariantTable {
-    height: 1fr;
+#split_container {
+    width: 1fr;
+    height: 100%;
+    layout: horizontal;
+}
+
+FixedVariantTable,
+#fixed_table {
+    height: 100%;
     background: #0b0f17;
 }
 
-SampleMatrixTable {
+#table_divider {
+    width: 1;
+    min-width: 1;
+    max-width: 1;
+    height: 100%;
+    color: #334155;
+    background: #0b0f17;
+}
+
+SampleMatrixTable,
+#sample_table {
     width: 1fr;
-    height: 1fr;
+    height: 100%;
     background: #0b0f17;
 }
 
 SidebarPanel {
-    width: 38;
+    width: 32;
+    min-width: 26;
+    max-width: 36;
     height: 1fr;
     background: #111827;
     border-left: vkey #1e293b;
