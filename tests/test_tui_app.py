@@ -131,5 +131,32 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertTrue(hasattr(sample_table, "_get_viewport_width"))
 
 
+class TestWidgetFilesPresence(unittest.TestCase):
+    """Verifies that all widget files and assets exist and compile without syntax errors."""
+
+    def test_all_ui_widget_files_exist(self):
+        src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "vcfscape"))
+        expected_files = [
+            os.path.join(src_root, "ui", "widgets", "footer_bar.py"),
+            os.path.join(src_root, "ui", "widgets", "header_bar.py"),
+            os.path.join(src_root, "ui", "widgets", "sidebar.py"),
+            os.path.join(src_root, "ui", "widgets", "cohort_stats_pane.py"),
+            os.path.join(src_root, "ui", "widgets", "variant_summary.py"),
+            os.path.join(src_root, "ui", "widgets", "variant_table.py"),
+            os.path.join(src_root, "ui", "widgets", "__init__.py"),
+            os.path.join(src_root, "ui", "screens", "cohort_manager_screen.py"),
+            os.path.join(src_root, "ui", "screens", "__init__.py"),
+            os.path.join(src_root, "ui", "app.py"),
+            os.path.join(src_root, "ui", "styles.tcss"),
+            os.path.join(src_root, "ui", "__init__.py"),
+            os.path.join(src_root, "core", "__init__.py"),
+            os.path.join(src_root, "core", "vcf_reader.py"),
+            os.path.join(src_root, "core", "cohorts.py"),
+            os.path.join(src_root, "core", "malaria_db.py"),
+        ]
+        for f in expected_files:
+            self.assertTrue(os.path.isfile(f), f"Expected file '{f}' to exist.")
+
+
 if __name__ == "__main__":
     unittest.main()

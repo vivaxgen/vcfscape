@@ -1,0 +1,87 @@
+/* VCFscape TCSS Stylesheet */
+
+Screen {
+    layout: vertical;
+    background: #0b0f17;
+    color: #e2e8f0;
+}
+
+HeaderBar {
+    dock: top;
+    height: 1;
+    background: #1e293b;
+    color: #e2e8f0;
+}
+
+#main_container {
+    height: 1fr;
+    layout: horizontal;
+}
+
+VariantSplitView {
+    width: 1fr;
+    height: 1fr;
+    layout: horizontal;
+}
+
+FixedVariantTable {
+    height: 1fr;
+    background: #0b0f17;
+}
+
+SampleMatrixTable {
+    width: 1fr;
+    height: 1fr;
+    background: #0b0f17;
+}
+
+SidebarPanel {
+    width: 38;
+    height: 1fr;
+    background: #111827;
+    border-left: vkey #1e293b;
+}
+
+CohortStatsPane {
+    dock: bottom;
+    background: #0d131f;
+    border-top: solid #1e293b;
+}
+
+FooterBar {
+    dock: bottom;
+    height: 2;
+    background: #090d14;
+    color: #94a3b8;
+}
+
+/* Light Theme overrides */
+Screen.theme-light {
+    background: #f8fafc;
+    color: #0f172a;
+}
+
+Screen.theme-light HeaderBar {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+
+Screen.theme-light FixedVariantTable,
+Screen.theme-light SampleMatrixTable {
+    background: #ffffff;
+}
+
+Screen.theme-light SidebarPanel {
+    background: #f1f5f9;
+    border-left: vkey #cbd5e1;
+}
+
+Screen.theme-light CohortStatsPane {
+    background: #f8fafc;
+    border-top: solid #cbd5e1;
+}
+
+Screen.theme-light FooterBar {
+    background: #e2e8f0;
+    color: #334155;
+}
