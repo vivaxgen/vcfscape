@@ -19,6 +19,14 @@ from vcfscape.ui.widgets.variant_summary import VariantSummary
 class CellInspector(Widget):
     """Compact window displaying all FORMAT values for the focused sample cell."""
 
+    DEFAULT_CSS = """
+    CellInspector {
+        height: auto;
+        padding: 0 1;
+        border-top: solid #1e293b;
+    }
+    """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.sample_id: Optional[str] = None
@@ -71,6 +79,15 @@ class CellInspector(Widget):
 class CohortListWidget(Widget):
     """Compact view of active sample cohorts and real-time filter."""
 
+    DEFAULT_CSS = """
+    CohortListWidget {
+        height: auto;
+        padding: 0 1;
+        border-top: solid #1e293b;
+        margin-bottom: 1;
+    }
+    """
+
     def __init__(self, cohort_manager: CohortManager, **kwargs):
         super().__init__(**kwargs)
         self.cohort_manager = cohort_manager
@@ -87,7 +104,7 @@ class CohortListWidget(Widget):
     def render(self) -> Text:
         text = Text()
         text.append(" COHORTS & FILTERS ", style="bold black on bright_magenta")
-        text.append(" [c=manage/define, f=filter]\n", style="dim")
+        text.append(" [c/f]\n", style="dim")
 
         # Display active cohorts compactly: 2 per line
         items = list(self.cohort_manager.cohorts.items())
@@ -103,7 +120,7 @@ class CohortListWidget(Widget):
                 chk, sname, count, col = line_items[j]
                 text.append(f"{chk} ", style="bold " + col)
                 text.append(f"{sname} ", style=col)
-                text.append(f"(n={count}) ", style="dim")
+                text.append(f"({count})  ", style="dim")
             text.append("\n")
 
         # Real-time Filter Buttons matching web simulator
@@ -120,6 +137,30 @@ class CohortListWidget(Widget):
 
 class SidebarPanel(Container):
     """Right sidebar panel containing Variant Summary, Cohort List, and Cell Inspector."""
+
+    DEFAULT_CSS = """
+    SidebarPanel {
+        width: 34;
+        min-width: 28;
+        max-width: 40;
+        height: 1fr;
+        background: #111827;
+        border-left: vkey #1e293b;
+        overflow-y: auto;
+    }
+
+    SidebarPanel > VariantSummary {
+        height: auto;
+    }
+
+    SidebarPanel > CohortListWidget {
+        height: auto;
+    }
+
+    SidebarPanel > CellInspector {
+        height: auto;
+    }
+    """
 
     def __init__(self, cohort_manager: CohortManager, **kwargs):
         super().__init__(**kwargs)

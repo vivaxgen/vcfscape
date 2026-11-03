@@ -53,12 +53,32 @@ SampleMatrixTable,
 }
 
 SidebarPanel {
-    width: 32;
-    min-width: 26;
-    max-width: 36;
+    width: 34;
+    min-width: 28;
+    max-width: 40;
     height: 1fr;
     background: #111827;
     border-left: vkey #1e293b;
+    overflow-y: auto;
+}
+
+SidebarPanel > VariantSummary {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+SidebarPanel > CohortListWidget {
+    height: auto;
+    padding: 0 1;
+    border-top: solid #1e293b;
+    margin-bottom: 1;
+}
+
+SidebarPanel > CellInspector {
+    height: auto;
+    padding: 0 1;
+    border-top: solid #1e293b;
 }
 
 CohortStatsPane {
@@ -93,6 +113,11 @@ Screen.theme-light SampleMatrixTable {
 Screen.theme-light SidebarPanel {
     background: #f1f5f9;
     border-left: vkey #cbd5e1;
+}
+
+Screen.theme-light SidebarPanel > CohortListWidget,
+Screen.theme-light SidebarPanel > CellInspector {
+    border-top: solid #cbd5e1;
 }
 
 Screen.theme-light CohortStatsPane {

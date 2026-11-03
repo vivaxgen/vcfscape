@@ -138,6 +138,16 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIsNotNone(split_view.sample_table)
         self.assertIsNotNone(split_view.fixed_table)
 
+    def test_sidebar_panel_widgets_configured(self):
+        """Verifies SidebarPanel contains all 3 widgets with proper initial content."""
+        sb = self.app.sidebar_panel
+        self.assertIsNotNone(sb.variant_summary)
+        self.assertIsNotNone(sb.cohort_widget)
+        self.assertIsNotNone(sb.cell_inspector)
+        self.assertIn("VARIANT SUMMARY", sb.variant_summary.render().plain)
+        self.assertIn("COHORTS & FILTERS", sb.cohort_widget.render().plain)
+        self.assertIn("CELL INSPECTOR", sb.cell_inspector.render().plain)
+
 
 class TestWidgetFilesPresence(unittest.TestCase):
     """Verifies that all widget files and assets exist and compile without syntax errors."""
