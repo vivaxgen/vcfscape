@@ -1,0 +1,6 @@
+{
+  "name": "Malaria VCF Inspector TUI",
+  "description": "High-performance Textual TUI and genomics workbench to inspect multi-allelic, indel-rich malaria VCF files with cyvcf2, drug resistance profiling, and cohort population genetics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

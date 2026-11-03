@@ -1,0 +1,24 @@
+[project]
+name = "vcfscape"
+version = "0.1.0"
+description = "VCFscape - VCF inspector part of vivaxGEN Project"
+authors = ["vivaxGEN Project <researcher@example.org>"]
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.10"
+cyvcf2 = ">=0.30.28"
+click = ">=8.0.0"
+rich = ">=13.0.0"
+
+[pypi-dependencies]
+vcfscape = { path = ".", editable = true }
+textual = ">=0.70.0"
+
+[tasks]
+tui = "vcfscape --demo"
+web = "vcfscape-web"
+dev-web = "npm run dev"
+build-web = "npm run build"
+test = "python -m unittest discover tests"
