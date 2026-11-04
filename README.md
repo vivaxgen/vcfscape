@@ -128,11 +128,110 @@ npm install
 # 2. Start Vite development server (port 3000)
 npm run dev
 
-# 3. Build production bundle to dist/ and sync to package
+# 3. Build production bundle to dist/
 npm run build
 
-# 4. Preview production build
+# 4. Build and sync directly into the Python package web_dist:
+npm run build:bundle
+
+# 5. Preview production build
 npm run preview
+```
+
+---
+
+## Local Web Development & Building from Source
+
+VCFscape's interactive web interface is built with **React 19**, **TypeScript**, **Tailwind CSS v4**, and **Vite**. You can easily set up a local development environment, edit the `.tsx` components, and test changes in real time.
+
+### 1. Prerequisites
+- **Node.js**: version `18.x` or `>=20.x`
+- **npm** (comes with Node.js), or **Pixi**
+
+> **Tip with Pixi**: If you use [Pixi](https://pixi.sh/), Node.js is automatically provisioned inside your environment via `pixi.toml`. You do not need to install Node.js globally on your system.
+
+### 2. Setting Up the Environment
+
+#### Using Standard npm:
+```bash
+# Clone the repository
+git clone https://github.com/<user>/vcfscape.git
+cd vcfscape
+
+# Install frontend dependencies
+npm install
+```
+
+#### Using Pixi:
+```bash
+# Pixi automatically installs Python, cyvcf2, Node.js, and Textual
+pixi install
+```
+
+### 3. Starting the Live Development Server
+Start the development server with Hot Module Replacement (HMR):
+
+```bash
+npm run dev
+# Or with Pixi:
+pixi run dev-web
+```
+
+This starts the Vite dev server at **`http://localhost:3000`**. Any changes made to `.tsx`, `.ts`, or `.css` files will instantly update in your browser without requiring a full page refresh.
+
+### 4. Codebase Structure: What to Edit
+
+| File / Directory | Purpose & Contents |
+|:---|:---|
+| `src/App.tsx` | Main application shell, keyboard shortcuts, header bar, view mode & theme states. |
+| `src/components/Sidebar.tsx` | Right sidebar containing `Cohorts & Filters`, `Variant Summary`, and `Cell Inspector`. |
+| `src/components/VariantTable.tsx` | Main split table view: fixed variant columns on left, horizontally scrollable sample matrix with half-screen auto-scroll on right. |
+| `src/components/CohortStatsSplitPane.tsx` | Bottom resizable split-pane calculating population genetics metrics (allele frequencies, mean read depth, missingness rate, polyclonal infection rates). |
+| `src/components/CohortManagerModal.tsx` | Modal dialog for defining, cloning, inverting, and managing sample cohorts. |
+| `src/components/VariantSummary.tsx` | Molecular details panel displaying locus, gene, mutation impact, and WHO antimalarial resistance annotations. |
+| `src/components/PixiGuideModal.tsx` | Interactive in-app help modal displaying setup and run commands. |
+| `src/types/vcf.ts` | TypeScript interface definitions for variants, sample genotypes, cohorts, and themes. |
+| `src/data/mockVcfData.ts` | Embedded surveillance dataset (*Pfkelch13*, *Pfcrt*, *Pfmdr1*, etc.) used for demo and testing. |
+| `src/index.css` | Global Tailwind CSS styles and theme definitions. |
+
+### 5. Type-Checking and Linting
+To check your TypeScript code for compilation or type errors before building:
+
+```bash
+npm run lint
+```
+*(Runs `tsc --noEmit` to validate all TypeScript code across the repository.)*
+
+### 6. Building the Web Application Locally
+
+#### Production Build (to `dist/`):
+```bash
+npm run build
+```
+This generates the optimized production bundles in `dist/`.
+
+#### Preview the Production Build:
+```bash
+npm run preview
+```
+Spins up a local static server to test the production build before distribution.
+
+### 7. Integrating Built Assets into the Python Package
+The Python package (`vcfscape-web`) serves pre-compiled assets from `src/vcfscape/web_dist/`. To compile the frontend and automatically update the embedded Python assets in a single step:
+
+```bash
+# Build and copy directly to src/vcfscape/web_dist/
+npm run build:bundle
+
+# Or using Pixi:
+pixi run build-bundle
+```
+
+Once built into `web_dist/`, you can test your customized web version using the Python launcher without Node.js:
+```bash
+python3 -m vcfscape.web_server
+# or:
+vcfscape-web
 ```
 
 ---

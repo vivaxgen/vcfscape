@@ -11,6 +11,7 @@ python = ">=3.10"
 cyvcf2 = ">=0.30.28"
 click = ">=8.0.0"
 rich = ">=13.0.0"
+nodejs = ">=18"
 
 [pypi-dependencies]
 vcfscape = { path = ".", editable = true }
@@ -21,4 +22,5 @@ tui = "vcfscape --demo"
 web = "vcfscape-web"
 dev-web = "npm run dev"
 build-web = "npm run build"
+build-bundle = "npm run build:bundle"
 test = "python -m unittest discover tests"

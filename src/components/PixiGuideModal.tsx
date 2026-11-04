@@ -37,9 +37,19 @@ export const PixiGuideModal: React.FC<PixiGuideModalProps> = ({ isOpen, onClose,
       desc: "Instant one-liner to clone and launch the web simulator in an ephemeral environment."
     },
     {
-      title: "Run Web Version with Node.js & Vite",
-      cmd: `npm install && npm run dev\n# Or build & preview:\nnpm run build && npm run preview`,
-      desc: "Starts the Vite development server on port 3000 with Hot Module Replacement."
+      title: "Local Development & Live Editing (.tsx files)",
+      cmd: `npm install\nnpm run dev\n# Or with Pixi: pixi run dev-web`,
+      desc: "Starts the live Vite dev server at http://localhost:3000 with Hot Module Replacement for editing React/TSX files."
+    },
+    {
+      title: "Build Web Version & Sync to Python Package",
+      cmd: `npm run build:bundle\n# Or with Pixi: pixi run build-bundle`,
+      desc: "Compiles TypeScript and Vite production assets directly into src/vcfscape/web_dist/ for Python's vcfscape-web launcher."
+    },
+    {
+      title: "Preview Production Build Locally",
+      cmd: `npm run build && npm run preview`,
+      desc: "Builds production assets to dist/ and runs a local static preview server."
     },
     {
       title: "Install Package via Pixi (PyPI from Git)",
