@@ -18,6 +18,7 @@ class VariantSummary(Widget):
     VariantSummary {
         height: auto;
         padding: 0 1;
+        border-top: solid #1e293b;
         margin-bottom: 1;
     }
     """

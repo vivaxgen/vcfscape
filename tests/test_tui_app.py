@@ -139,7 +139,7 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIsNotNone(split_view.fixed_table)
 
     def test_sidebar_panel_widgets_configured(self):
-        """Verifies SidebarPanel contains all 3 widgets with proper initial content."""
+        """Verifies SidebarPanel contains all 3 widgets in requested order with proper initial content."""
         sb = self.app.sidebar_panel
         self.assertIsNotNone(sb.variant_summary)
         self.assertIsNotNone(sb.cohort_widget)
@@ -147,6 +147,10 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIn("VARIANT SUMMARY", sb.variant_summary.render().plain)
         self.assertIn("COHORTS & FILTERS", sb.cohort_widget.render().plain)
         self.assertIn("CELL INSPECTOR", sb.cell_inspector.render().plain)
+
+        # Verify exact compose order: CohortListWidget, VariantSummary, CellInspector
+        children = [c.__class__.__name__ for c in sb.children]
+        self.assertEqual(children, ["CohortListWidget", "VariantSummary", "CellInspector"])
 
 
 class TestWidgetFilesPresence(unittest.TestCase):

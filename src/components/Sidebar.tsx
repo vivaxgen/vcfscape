@@ -35,10 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           : "bg-[#131b26] border-[#1e293b] divide-[#1e293b] scrollbar-thumb-slate-700 text-slate-200"
       }`}
     >
-      {/* 1. Variant Summary Panel (Locus, Gene/Impact, Type, Drug Resistance) */}
-      <VariantSummary variant={variant} theme={theme} />
-
-      {/* 2. Cohorts & Filters */}
+      {/* 1. Cohorts & Filters (CohortListWidget) */}
       <div className="p-3 space-y-2.5">
         <div className="flex items-center justify-between">
           <span
@@ -140,6 +137,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 2. Variant Summary Panel (VariantSummary) */}
+      <VariantSummary variant={variant} theme={theme} />
 
       {/* 3. Cell Inspector (Current sample's FORMAT fields) */}
       <div className="p-3 space-y-2">

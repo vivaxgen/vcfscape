@@ -83,7 +83,6 @@ class CohortListWidget(Widget):
     CohortListWidget {
         height: auto;
         padding: 0 1;
-        border-top: solid #1e293b;
         margin-bottom: 1;
     }
     """
@@ -136,7 +135,7 @@ class CohortListWidget(Widget):
 
 
 class SidebarPanel(Container):
-    """Right sidebar panel containing Variant Summary, Cohort List, and Cell Inspector."""
+    """Right sidebar panel containing Cohort List, Variant Summary, and Cell Inspector."""
 
     DEFAULT_CSS = """
     SidebarPanel {
@@ -149,16 +148,23 @@ class SidebarPanel(Container):
         overflow-y: auto;
     }
 
-    SidebarPanel > VariantSummary {
-        height: auto;
-    }
-
     SidebarPanel > CohortListWidget {
         height: auto;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+
+    SidebarPanel > VariantSummary {
+        height: auto;
+        padding: 0 1;
+        border-top: solid #1e293b;
+        margin-bottom: 1;
     }
 
     SidebarPanel > CellInspector {
         height: auto;
+        padding: 0 1;
+        border-top: solid #1e293b;
     }
     """
 
@@ -170,8 +176,8 @@ class SidebarPanel(Container):
         self.cell_inspector = CellInspector()
 
     def compose(self):
-        yield self.variant_summary
         yield self.cohort_widget
+        yield self.variant_summary
         yield self.cell_inspector
 
     def update_selection(self, record: VariantRecord, sample_id: Optional[str] = None):
