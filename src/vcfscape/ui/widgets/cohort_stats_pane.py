@@ -100,7 +100,7 @@ class CohortStatsPane(Widget):
     MAX_HEIGHT = 22
     DEFAULT_HEIGHT = 8
 
-    is_collapsed = reactive(False)
+    is_collapsed = reactive(True)
     current_height = reactive(8)
 
     def __init__(self, cohort_manager: CohortManager, **kwargs):
@@ -108,6 +108,7 @@ class CohortStatsPane(Widget):
         self.cohort_manager = cohort_manager
         self.current_record: Optional[VariantRecord] = None
         self.stats: Dict[str, CohortStats] = {}
+        self.is_collapsed = True
         self.current_height = self.DEFAULT_HEIGHT
 
         self.handle = CohortStatsHandle(self, id="cohort_stats_handle")
@@ -118,13 +119,9 @@ class CohortStatsPane(Widget):
         yield self.content_widget
 
     def on_mount(self) -> None:
-        if self.current_record:
-            self.update_stats(self.current_record)
-            optimal_h = self.get_optimal_height()
-            self.current_height = optimal_h
-            self.styles.height = optimal_h
-        else:
-            self.styles.height = self.current_height
+        # Initial start: pane is collapsed, content hidden, no stats computed
+        self.styles.height = 1
+        self.content_widget.display = False
         self._refresh_display()
 
     def get_optimal_height(self) -> int:
@@ -145,6 +142,8 @@ class CohortStatsPane(Widget):
         if self.is_collapsed:
             self.is_collapsed = False
             self.content_widget.display = True
+            if self.current_record:
+                self.update_stats(self.current_record)
         self.styles.height = clamped
         self._refresh_display()
         return clamped
@@ -155,21 +154,22 @@ class CohortStatsPane(Widget):
 
     def toggle_pane(self) -> bool:
         """Toggles between expanded and collapsed state.
-        When expanded via [s], recalculates optimal height to show all lines.
+        When expanded via [s], recalculates optimal height and computes stats.
         """
         self.is_collapsed = not self.is_collapsed
         if self.is_collapsed:
             self.styles.height = 1
             self.content_widget.display = False
         else:
+            self.content_widget.display = True
             if self.current_record:
+                # Calculate stats only when becoming visible
                 self.update_stats(self.current_record)
                 optimal_h = self.get_optimal_height()
                 self.current_height = optimal_h
                 self.styles.height = optimal_h
             else:
                 self.styles.height = self.current_height
-            self.content_widget.display = True
         self._refresh_display()
         return not self.is_collapsed
 

@@ -90,7 +90,10 @@ class VcfscapeApp(App):
         sample_id = message.sample_id
         
         self.sidebar_panel.update_selection(rec, sample_id)
-        self.stats_pane.update_stats(rec)
+        if not self.stats_pane.is_collapsed:
+            self.stats_pane.update_stats(rec)
+        else:
+            self.stats_pane.current_record = rec
 
         sample_info = f" | Sample: {sample_id}" if sample_id else ""
         drug_note = f" [{rec.drug_annotation.drug} Resistance]" if rec.drug_annotation else ""

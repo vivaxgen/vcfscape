@@ -56,9 +56,9 @@ class TestMalariaVcfApp(unittest.TestCase):
 
     def test_cohort_stats_pane_resizing(self):
         pane = self.app.stats_pane
-        # Initial height should be DEFAULT_HEIGHT (8)
+        # Initial state: pane is collapsed on initial start
         self.assertEqual(pane.current_height, 8)
-        self.assertFalse(pane.is_collapsed)
+        self.assertTrue(pane.is_collapsed)
 
         # Grow pane by 2 rows
         new_h = pane.resize_by(2)
@@ -80,7 +80,12 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertEqual(new_h, pane.MIN_HEIGHT)
         self.assertEqual(pane.current_height, pane.MIN_HEIGHT)
 
-        # Test collapse toggle
+        # Test collapse toggle: starts collapsed, 1st toggle expands it
+        is_expanded = pane.toggle_pane()
+        self.assertTrue(is_expanded)
+        self.assertFalse(pane.is_collapsed)
+
+        # 2nd toggle collapses it
         is_expanded = pane.toggle_pane()
         self.assertFalse(is_expanded)
         self.assertTrue(pane.is_collapsed)

@@ -29,7 +29,24 @@ class TestCohortStatsPane(unittest.TestCase):
 
     def test_initial_state(self):
         self.assertEqual(self.pane.current_height, 8)
+        self.assertTrue(self.pane.is_collapsed)
+
+    def test_stats_not_calculated_when_collapsed(self):
+        rec = MagicMock()
+        rec.alt = ["T"]
+        rec.genotypes = {}
+        rec.depths = {}
+        rec.ad = {}
+        rec.num_alleles = 2
+
+        # Updating while collapsed should NOT calculate stats
+        self.pane.update_stats(rec)
+        self.pane.cohort_manager.calculate_variant_stats.assert_not_called()
+
+        # Expanding via toggle_pane() should calculate stats
+        self.pane.toggle_pane()
         self.assertFalse(self.pane.is_collapsed)
+        self.pane.cohort_manager.calculate_variant_stats.assert_called_once()
 
     def test_resize_by_increments(self):
         self.pane.resize_by(2)
@@ -48,12 +65,17 @@ class TestCohortStatsPane(unittest.TestCase):
         self.assertEqual(self.pane.current_height, self.pane.MIN_HEIGHT)
 
     def test_toggle_collapse(self):
-        self.pane.toggle_pane()
+        # Starts collapsed
         self.assertTrue(self.pane.is_collapsed)
 
+        # 1st toggle expands
         self.pane.toggle_pane()
         self.assertFalse(self.pane.is_collapsed)
         self.assertEqual(self.pane.current_height, 8)
+
+        # 2nd toggle collapses
+        self.pane.toggle_pane()
+        self.assertTrue(self.pane.is_collapsed)
 
     def test_toggle_collapse_with_variant(self):
         rec1 = MagicMock()
@@ -63,7 +85,11 @@ class TestCohortStatsPane(unittest.TestCase):
         rec1.ad = {}
         rec1.num_alleles = 2
 
-        # Scrolling/selecting rec1 updates content, but does NOT auto-change height
+        # Expand pane
+        self.pane.toggle_pane()
+        self.assertFalse(self.pane.is_collapsed)
+
+        # Scrolling/selecting rec1 updates content while visible
         self.pane.update_stats(rec1)
         self.assertEqual(self.pane.current_height, 8)
         self.assertIsNotNone(self.pane.current_record)
@@ -86,13 +112,14 @@ class TestCohortStatsPane(unittest.TestCase):
         rec2.num_alleles = 3
 
         self.pane.update_stats(rec2)
-        self.assertEqual(self.pane.current_height, 9)  # unchanged during scroll
+        self.assertEqual(self.pane.current_height, 9)
 
         # Toggle off and on via [s]: manually re-heights for rec2 to 10
         self.pane.toggle_pane()
         self.assertTrue(self.pane.is_collapsed)
         self.pane.toggle_pane()
         self.assertFalse(self.pane.is_collapsed)
+        self.assertEqual(self.pane.current_height, 10)
         self.assertEqual(self.pane.current_height, 10)
 
 

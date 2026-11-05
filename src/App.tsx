@@ -44,7 +44,7 @@ export default function App() {
     return "dark";
   });
 
-  const [isSplitExpanded, setIsSplitExpanded] = useState<boolean>(true);
+  const [isSplitExpanded, setIsSplitExpanded] = useState<boolean>(false);
   const [splitHeight, setSplitHeight] = useState<number>(180);
 
   const [logMessage, setLogMessage] = useState<string>(
