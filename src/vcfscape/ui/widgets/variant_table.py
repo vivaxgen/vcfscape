@@ -289,10 +289,6 @@ class VariantSplitView(Widget):
         )
         self._is_shifting = False
 
-    def update_total_variants(self, count: int) -> None:
-        """Update total variant count when background counter completes."""
-        self.total_records_count = count
-
         # 1. Left Fixed Table
         self.fixed_table = FixedVariantTable(id="fixed_table", cursor_type="row", zebra_stripes=True)
         self.fixed_table.show_cursor = True
@@ -313,6 +309,10 @@ class VariantSplitView(Widget):
         # Link peers directly
         self.fixed_table.peer_table = self.sample_table
         self.sample_table.peer_table = self.fixed_table
+
+    def update_total_variants(self, count: int) -> None:
+        """Update total variant count when background counter completes."""
+        self.total_records_count = count
 
     def shift_buffer(self, new_start: int, target_cursor_row: Optional[int] = None) -> None:
         """Shifts the live row buffer window dynamically without lag."""
