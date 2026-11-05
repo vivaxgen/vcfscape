@@ -28,6 +28,7 @@ class TestCohortManagerScreen(unittest.TestCase):
             "BS_001", "BS_002", "BS_003"
         ]
         self.manager = CohortManager(self.samples)
+        self.manager.add_cohort("Cohort KL", [s for s in self.samples if s.startswith("KL_")])
 
     def test_screen_initialization(self):
         screen = CohortManagerScreen(self.manager, initial_cohort="Cohort KL")

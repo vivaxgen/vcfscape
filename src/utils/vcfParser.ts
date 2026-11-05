@@ -124,57 +124,16 @@ export function parseVcfText(content: string, filename: string): ParsedVcfResult
     });
   }
 
-  // Generate default cohorts
+  // Default cohorts: only All Samples baseline (no automatic initial cohorts)
   const cohorts: Cohort[] = [
     {
       name: "All Samples",
       sampleIds: [...samples],
-      description: `All ${samples.length} malaria surveillance isolates`,
+      description: `All ${samples.length} isolates in VCF`,
       active: true,
       color: "#10b981",
     },
   ];
-
-  // Detect sample prefix groupings
-  const prefixMap: Record<string, string[]> = {};
-  samples.forEach((s) => {
-    const prefix = s.includes("_") ? s.split("_")[0] : s.substring(0, 2);
-    if (!prefixMap[prefix]) prefixMap[prefix] = [];
-    prefixMap[prefix].push(s);
-  });
-
-  const COHORT_COLORS = ["#3b82f6", "#a855f7", "#f59e0b", "#ec4899", "#14b8a6", "#6366f1"];
-  const prefixes = Object.keys(prefixMap).filter((p) => prefixMap[p].length >= 2);
-
-  if (prefixes.length > 1) {
-    prefixes.forEach((p, idx) => {
-      cohorts.push({
-        name: `Cohort ${p}`,
-        sampleIds: prefixMap[p],
-        description: `Samples with prefix ${p} (n=${prefixMap[p].length})`,
-        active: true,
-        color: COHORT_COLORS[idx % COHORT_COLORS.length],
-      });
-    });
-  } else if (samples.length > 2) {
-    const mid = Math.floor(samples.length / 2);
-    cohorts.push(
-      {
-        name: "Cohort 1",
-        sampleIds: samples.slice(0, mid),
-        description: `Group 1 (n=${mid})`,
-        active: true,
-        color: "#3b82f6",
-      },
-      {
-        name: "Cohort 2",
-        sampleIds: samples.slice(mid),
-        description: `Group 2 (n=${samples.length - mid})`,
-        active: true,
-        color: "#a855f7",
-      }
-    );
-  }
 
   return {
     filename,

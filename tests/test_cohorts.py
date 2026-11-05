@@ -19,14 +19,14 @@ class TestCohorts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.reader = VcfReader(DEMO_VCF)
-        cls.manager = CohortManager(cls.reader.samples)
+
+    def setUp(self):
+        self.manager = CohortManager(self.reader.samples)
 
     def test_default_cohort_creation(self):
-        # Expect "All Samples", "Cohort KL", "Cohort AS", "Cohort BS"
+        # By default, no automatic initial cohorts are created (only "All Samples" baseline exists)
         self.assertIn("All Samples", self.manager.cohorts)
-        self.assertIn("Cohort KL", self.manager.cohorts)
-        self.assertIn("Cohort AS", self.manager.cohorts)
-        self.assertIn("Cohort BS", self.manager.cohorts)
+        self.assertEqual(len(self.manager.cohorts), 1)
 
     def test_allele_frequency_calculation(self):
         rec = self.reader.get_records()[0]  # k13 C580Y
@@ -52,12 +52,15 @@ class TestCohorts(unittest.TestCase):
         self.assertGreater(all_stats.mean_depth, 20.0)
 
     def test_cohort_toggling(self):
-        # Toggle Cohort KL
+        # Add custom cohort and toggle it
+        self.manager.add_cohort("Cohort KL", self.reader.samples[:8])
         active_before = self.manager.cohorts["Cohort KL"].active
         new_state = self.manager.toggle_cohort("Cohort KL")
         self.assertNotEqual(active_before, new_state)
 
     def test_cohort_cloning(self):
+        if "Cohort KL" not in self.manager.cohorts:
+            self.manager.add_cohort("Cohort KL", self.reader.samples[:8])
         cloned = self.manager.clone_cohort("Cohort KL")
         self.assertEqual(cloned.name, "Cohort KL (Copy)")
         self.assertEqual(cloned.sample_ids, self.manager.cohorts["Cohort KL"].sample_ids)

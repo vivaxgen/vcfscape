@@ -14,27 +14,6 @@ export const INITIAL_COHORTS: Cohort[] = [
     color: "#10b981",
     active: true,
   },
-  {
-    name: "Cohort KL (Clinical)",
-    sampleIds: SAMPLES.filter(s => s.startsWith("KL_")),
-    description: "Clinical admissions with acute febrile malaria",
-    color: "#3b82f6",
-    active: true,
-  },
-  {
-    name: "Cohort AS (Asymptomatic)",
-    sampleIds: SAMPLES.filter(s => s.startsWith("AS_")),
-    description: "Community cross-sectional survey carriers",
-    color: "#a855f7",
-    active: true,
-  },
-  {
-    name: "Cohort BS (Border)",
-    sampleIds: SAMPLES.filter(s => s.startsWith("BS_")),
-    description: "Mobile & migrant population border screening",
-    color: "#f59e0b",
-    active: true,
-  },
 ];
 
 // Helper to generate sample records

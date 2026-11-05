@@ -66,14 +66,14 @@ class Cohort:
 class CohortManager:
     """Manages cohorts and computes on-the-fly multi-allelic population metrics."""
 
-    def __init__(self, all_samples: List[str]):
+    def __init__(self, all_samples: List[str], auto_detect: bool = False):
         self.all_samples: List[str] = list(all_samples)
         self.cohorts: Dict[str, Cohort] = {}
-        self._init_default_cohorts()
+        self._init_default_cohorts(auto_detect=auto_detect)
 
-    def _init_default_cohorts(self):
-        """Auto-detects common sample prefixes (e.g., KL_*, AS_*, BS_*, Pf_*) or creates 2 groups."""
-        # Always have All Samples cohort
+    def _init_default_cohorts(self, auto_detect: bool = False):
+        """Initializes baseline All Samples cohort. Does not perform automatic initial cohorts by default."""
+        # Always have All Samples baseline cohort
         self.cohorts["All Samples"] = Cohort(
             "All Samples",
             list(self.all_samples),
@@ -82,7 +82,10 @@ class CohortManager:
             active=True
         )
 
-        # Detect prefixes
+        if not auto_detect:
+            return
+
+        # Detect prefixes only if explicitly requested
         prefix_groups: Dict[str, List[str]] = {}
         for s in self.all_samples:
             prefix = s.split("_")[0] if "_" in s else (s[:2] if len(s) >= 4 else "Other")

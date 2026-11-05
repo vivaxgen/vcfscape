@@ -158,6 +158,8 @@ class VcfscapeApp(App):
             self.sidebar_panel.cohort_widget.refresh()
             if self.table_widget.records:
                 self.stats_pane.update_stats(self.table_widget.records[0])
+        else:
+            self.footer_bar.set_log("No custom cohorts defined. Press 'c' to open Cohort Manager.")
 
     def action_toggle_filter(self):
         filters = ["ALL", "DRUG_RESISTANT", "INDEL", "SNP"]

@@ -109,6 +109,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             );
           })}
+          {cohorts.length <= 1 && (
+            <div className={`text-[10px] italic py-1 px-1 leading-tight ${isLight ? "text-slate-500" : "text-slate-500"}`}>
+              No custom cohorts defined. Click "Manage" or press 'c' to create cohorts.
+            </div>
+          )}
         </div>
 
         {/* Real-time Filter Buttons */}
