@@ -15,6 +15,7 @@ from vcfscape.ui.widgets.sidebar import SidebarPanel
 from vcfscape.ui.widgets.cohort_stats_pane import CohortStatsPane
 from vcfscape.ui.widgets.footer_bar import FooterBar
 from vcfscape.ui.screens.cohort_manager_screen import CohortManagerScreen
+from vcfscape.ui.screens.jump_region_screen import JumpRegionScreen
 
 
 class VcfscapeApp(App):
@@ -29,6 +30,7 @@ class VcfscapeApp(App):
         Binding("3", "set_tag_ad", "AD", show=False),
         Binding("4", "set_tag_gq", "GQ", show=False),
         Binding("v", "cycle_view", "View Mode", show=False),
+        Binding("g", "jump_region", "Jump Locus", show=False),
         Binding("s", "toggle_split", "Split Pane", show=False),
         Binding("+", "resize_split_up", "Grow Split Pane", show=False),
         Binding("=", "resize_split_up", "Grow Split Pane", show=False),
@@ -47,7 +49,7 @@ class VcfscapeApp(App):
     def __init__(self, vcf_path: str, **kwargs):
         super().__init__(**kwargs)
         self.vcf_path = vcf_path
-        self.reader = VcfReader(vcf_path)
+        self.reader = VcfReader(vcf_path, lazy=True)
         self.cohort_manager = CohortManager(self.reader.samples)
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
 
@@ -59,10 +61,16 @@ class VcfscapeApp(App):
         )
         self.header_bar.backend = self.reader.backend
 
-        # True split: left fixed columns + right scrollable samples
+        # True split with virtual buffer: left fixed columns + right scrollable samples
+        initial_slice = (
+            self.reader.get_slice(0, 150)
+            if self.reader.total_variants > 150
+            else self.reader.get_records()
+        )
         self.table_widget = VariantSplitView(
-            records=self.reader.get_records(),
+            records=initial_slice,
             samples=self.reader.samples,
+            reader=self.reader,
         )
         self.sidebar_panel = SidebarPanel(self.cohort_manager)
         self.stats_pane = CohortStatsPane(self.cohort_manager)
@@ -183,9 +191,22 @@ class VcfscapeApp(App):
             self.dark = False
             self.footer_bar.set_log("Switched theme to [LIGHT] mode.")
 
+    def action_jump_region(self):
+        """Open genomic locus jumper modal dialog."""
+        def on_dismiss(target):
+            if target:
+                chrom, pos = target
+                ok = self.table_widget.jump_to_region(chrom, pos)
+                if ok:
+                    self.footer_bar.set_log(f"Jumped to genomic locus {chrom}:{pos:,}")
+                else:
+                    self.footer_bar.set_log(f"No variants found near {chrom}:{pos:,}")
+
+        self.push_screen(JumpRegionScreen(), on_dismiss)
+
     def action_show_help(self):
         self.footer_bar.set_log(
-            "Hotkeys: 1=GT, 2=DP, 3=AD, 4=GQ, v=View, s=Split, +/-=Resize, c=Cohorts, f=Filter, t=Theme, q=Quit"
+            "Hotkeys: 1=GT, 2=DP, 3=AD, 4=GQ, v=View, g=Jump Locus, s=Split, +/-=Resize, c=Cohorts, f=Filter, t=Theme, q=Quit"
         )
 
 

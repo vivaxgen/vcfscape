@@ -263,15 +263,23 @@ class VariantSplitView(Widget):
         self,
         records: List[VariantRecord],
         samples: List[str],
+        reader: Optional[Any] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.reader = reader
         self.records = records
         self.samples = samples
         self._syncing_cursor = False
         self.current_row_idx = 0
         self.current_sample_idx = 0
         self._last_notified: Optional[Tuple[int, int]] = None
+
+        # Virtual windowing buffer state
+        self.window_size = 150
+        self.buffer_start = 0
+        self.total_records_count = self.reader.total_variants if self.reader else len(records)
+        self._is_shifting = False
 
         # 1. Left Fixed Table
         self.fixed_table = FixedVariantTable(id="fixed_table", cursor_type="row", zebra_stripes=True)
@@ -293,6 +301,43 @@ class VariantSplitView(Widget):
         # Link peers directly
         self.fixed_table.peer_table = self.sample_table
         self.sample_table.peer_table = self.fixed_table
+
+    def shift_buffer(self, new_start: int, target_cursor_row: Optional[int] = None) -> None:
+        """Shifts the live row buffer window dynamically without lag."""
+        if not self.reader or self._is_shifting or self.total_records_count <= self.window_size:
+            return
+
+        new_start = max(0, min(new_start, self.total_records_count - self.window_size))
+        if new_start == self.buffer_start:
+            return
+
+        self._is_shifting = True
+        try:
+            self.buffer_start = new_start
+            self.records = self.reader.get_slice(self.buffer_start, self.window_size)
+            self.rebuild_tables()
+            if target_cursor_row is not None and 0 <= target_cursor_row < len(self.records):
+                self.fixed_table.move_cursor(row=target_cursor_row, animate=False)
+                self.sample_table.move_cursor(row=target_cursor_row, animate=False)
+        finally:
+            self._is_shifting = False
+
+    def jump_to_region(self, chrom: str, pos: int) -> bool:
+        """Seek and center table directly on target genomic coordinates."""
+        if not self.reader:
+            return False
+
+        records = self.reader.query_region(chrom, pos, pos + 500000, limit=self.window_size)
+        if not records:
+            # Fallback broader query or closest variants
+            records = self.reader.query_region(chrom, max(0, pos - 100000), pos + 100000, limit=self.window_size)
+
+        if records:
+            self.records = records
+            self.current_row_idx = 0
+            self.rebuild_tables()
+            return True
+        return False
 
     def compose(self):
         with Horizontal(id="split_container"):
@@ -420,6 +465,21 @@ class VariantSplitView(Widget):
                 return Text(val, style="dim")
         return Text(val, style="white")
 
+    def _check_buffer_boundary(self, target_row: int) -> None:
+        """Dynamically shift buffer window when cursor approaches top or bottom edge."""
+        if not self.reader or self._is_shifting or self.total_records_count <= self.window_size:
+            return
+        buffer_len = len(self.records)
+        shift_step = 40
+        if target_row >= buffer_len - 15 and (self.buffer_start + buffer_len) < self.total_records_count:
+            new_start = min(self.total_records_count - self.window_size, self.buffer_start + shift_step)
+            new_cursor = max(0, target_row - (new_start - self.buffer_start))
+            self.shift_buffer(new_start, target_cursor_row=new_cursor)
+        elif target_row <= 15 and self.buffer_start > 0:
+            new_start = max(0, self.buffer_start - shift_step)
+            new_cursor = min(self.window_size - 1, target_row + (self.buffer_start - new_start))
+            self.shift_buffer(new_start, target_cursor_row=new_cursor)
+
     # Synchronize Cursor Movement (Arrow Up/Down, Cell Selection)
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
         if event.data_table.id == "fixed_table":
@@ -439,6 +499,7 @@ class VariantSplitView(Widget):
             if self.current_row_idx != target_row:
                 self.current_row_idx = target_row
                 self._notify_selection(self.current_row_idx, self.current_sample_idx)
+                self._check_buffer_boundary(target_row)
 
     def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted):
         if event.data_table.id == "sample_table":
@@ -461,6 +522,7 @@ class VariantSplitView(Widget):
                 self.current_sample_idx = target_col
                 self.sample_table.scroll_column_half_screen(target_col)
                 self._notify_selection(self.current_row_idx, self.current_sample_idx)
+                self._check_buffer_boundary(target_row)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int):
         if 0 <= row_idx < len(self.records):

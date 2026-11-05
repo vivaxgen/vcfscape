@@ -18,6 +18,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose, theme = "
     { key: "3", action: "Allelic Depth (AD)", desc: "Show allelic depths for REF and multi-allelic ALT alleles" },
     { key: "4", action: "Genotype Quality (GQ)", desc: "Show Phred-scaled confidence score" },
     { key: "v", action: "Cycle View Mode", desc: "Toggle between Normal, Compact, Essential, and Raw 9-column view" },
+    { key: "g", action: "Jump to Locus", desc: "Instantly seek directly to chromosome:position or resistance gene (k13, crt, etc.)" },
     { key: "s", action: "Toggle Split-Pane", desc: "Expand or collapse the Cohort Statistics split-pane" },
     { key: "c", action: "Cohort Manager", desc: "Open modal to define, clone, invert selections, or delete cohorts" },
     { key: "f", action: "Cycle Filter", desc: "Filter by ALL, DRUG_RESISTANT, INDEL, or SNP" },

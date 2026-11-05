@@ -14,10 +14,12 @@ import { FooterBar } from "./components/FooterBar";
 import { PixiGuideModal } from "./components/PixiGuideModal";
 import { HelpModal } from "./components/HelpModal";
 import { CohortModal } from "./components/CohortModal";
+import { JumpModal } from "./components/JumpModal";
 import { readVcfFile } from "./utils/vcfParser";
 
 export default function App() {
   const [variants, setVariants] = useState<Variant[]>(VARIANTS_DATA);
+  const [totalVariantsCount, setTotalVariantsCount] = useState<number>(VARIANTS_DATA.length);
   const [samples, setSamples] = useState<string[]>(SAMPLES);
   const [filename, setFilename] = useState<string>("pf3d7_surveillance_demo.vcf");
   const [cohorts, setCohorts] = useState<Cohort[]>(INITIAL_COHORTS);
@@ -30,6 +32,7 @@ export default function App() {
   const [formatTag, setFormatTag] = useState<FormatTag>("GT");
 
   const [isCohortModalOpen, setIsCohortModalOpen] = useState<boolean>(false);
+  const [isJumpModalOpen, setIsJumpModalOpen] = useState<boolean>(false);
 
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
@@ -45,13 +48,13 @@ export default function App() {
   const [splitHeight, setSplitHeight] = useState<number>(180);
 
   const [logMessage, setLogMessage] = useState<string>(
-    "Loaded malaria surveillance dataset. Press 1-4 for format tags, v for view mode, s for split-pane, t for theme."
+    "Loaded malaria surveillance dataset. Press 1-4 for format tags, v for view, g to jump locus, s for split-pane, t for theme."
   );
 
   const [isPixiModalOpen, setIsPixiModalOpen] = useState<boolean>(false);
   const [isHelpModalOpen, setIsHelpModalOpen] = useState<boolean>(false);
 
-  // Fetch CLI-provided VCF data from local server if available
+  // Fetch CLI-provided VCF data from local server if available (streaming chunked API)
   useEffect(() => {
     let cancelled = false;
     const fetchVcfData = async () => {
@@ -59,6 +62,38 @@ export default function App() {
         const urlParams = new URLSearchParams(window.location.search);
         const token = urlParams.get("token");
         const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+
+        // 1. Try fast metadata endpoint first
+        let metaResp = await fetch(`/api/metadata${tokenQuery}`, { credentials: "same-origin" });
+        if (metaResp.ok) {
+          const meta = await metaResp.json();
+          if (cancelled) return;
+          if (meta.hasCustomVcf) {
+            setFilename(meta.filename);
+            if (Array.isArray(meta.samples)) setSamples(meta.samples);
+            if (Array.isArray(meta.cohorts) && meta.cohorts.length > 0) setCohorts(meta.cohorts);
+            setTotalVariantsCount(meta.totalVariants || 0);
+
+            // Fetch initial slice of variants (sub-15ms)
+            const varQuery = token ? `&token=${encodeURIComponent(token)}` : "";
+            const varResp = await fetch(`/api/variants?offset=0&limit=150${varQuery}`, { credentials: "same-origin" });
+            if (varResp.ok) {
+              const varData = await varResp.json();
+              if (cancelled) return;
+              if (Array.isArray(varData.variants) && varData.variants.length > 0) {
+                setVariants(varData.variants);
+                setSelectedVariantIndex(0);
+                setSelectedSampleIndex(0);
+                setLogMessage(
+                  `Ready: ${meta.totalVariants.toLocaleString()} variants across ${meta.totalSamples} isolates from ${meta.filename} (${meta.backend}).`
+                );
+                return;
+              }
+            }
+          }
+        }
+
+        // 2. Fallback to /api/vcf-data or static vcf_data.json
         let resp = await fetch(`/api/vcf-data${tokenQuery}`, { credentials: "same-origin" });
         if (!resp.ok) {
           resp = await fetch(`/vcf_data.json${tokenQuery}`, { credentials: "same-origin" });
@@ -80,6 +115,7 @@ export default function App() {
             if (d.filename) {
               setFilename(d.filename);
             }
+            setTotalVariantsCount(d.totalVariants || d.variants.length);
             setSelectedVariantIndex(0);
             setSelectedSampleIndex(0);
             setLogMessage(
@@ -258,6 +294,59 @@ export default function App() {
     });
   }, []);
 
+  // Fetch more variants on scroll when streaming large datasets
+  const handleNeedMoreRows = useCallback(async (offset: number, limit: number) => {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get("token");
+      const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : "";
+      const resp = await fetch(`/api/variants?offset=${offset}&limit=${limit}${tokenQuery}`, {
+        credentials: "same-origin",
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data.variants) && data.variants.length > 0) {
+          setVariants((prev) => {
+            const existingIds = new Set(prev.map((x) => x.id));
+            const newRows = data.variants.filter((x: Variant) => !existingIds.has(x.id));
+            return [...prev, ...newRows];
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Jump directly to a genomic coordinate or marker gene
+  const handleJumpLocus = useCallback(async (chrom: string, pos: number) => {
+    try {
+      setLogMessage(`Seeking to ${chrom}:${pos.toLocaleString()}...`);
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get("token");
+      const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : "";
+      const start = Math.max(0, pos - 10000);
+      const end = pos + 100000;
+      const resp = await fetch(
+        `/api/region?chrom=${encodeURIComponent(chrom)}&start=${start}&end=${end}&limit=100${tokenQuery}`,
+        { credentials: "same-origin" }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data.variants) && data.variants.length > 0) {
+          setVariants(data.variants);
+          setSelectedVariantIndex(0);
+          setSelectedSampleIndex(0);
+          setLogMessage(`Jumped to ${chrom}:${pos.toLocaleString()} (${data.variants.length} nearby variants).`);
+          return;
+        }
+      }
+      setLogMessage(`No variants found near ${chrom}:${pos.toLocaleString()}`);
+    } catch (e: unknown) {
+      setLogMessage(`Error seeking locus: ${String(e)}`);
+    }
+  }, []);
+
   // Cell selection
   const handleSelectCell = useCallback(
     (vIdx: number, sIdx: number) => {
@@ -298,6 +387,10 @@ export default function App() {
         case "v":
         case "V":
           handleCycleViewMode();
+          break;
+        case "g":
+        case "G":
+          setIsJumpModalOpen((prev) => !prev);
           break;
         case "s":
         case "S":
@@ -403,7 +496,7 @@ export default function App() {
       {/* 1. Top Header Bar */}
       <HeaderBar
         filename={filename}
-        totalVariants={filteredVariants.length}
+        totalVariants={totalVariantsCount > filteredVariants.length ? totalVariantsCount : filteredVariants.length}
         totalSamples={samples.length}
         viewMode={viewMode}
         formatTag={formatTag}
@@ -413,13 +506,15 @@ export default function App() {
         onOpenPixiGuide={() => setIsPixiModalOpen(true)}
         onOpenHelp={() => setIsHelpModalOpen(true)}
         onOpenFile={handleOpenFile}
+        onOpenJumpModal={() => setIsJumpModalOpen(true)}
       />
 
       {/* 2. Main Center Container (Table + Right Sidebar) */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Central Data Table with vertical split */}
+        {/* Central Data Table with vertical split and row virtualization */}
         <VariantTable
           variants={filteredVariants}
+          totalVariantsCount={totalVariantsCount}
           samples={samples}
           selectedVariantIndex={selectedVariantIndex}
           selectedSampleIndex={selectedSampleIndex}
@@ -427,6 +522,7 @@ export default function App() {
           formatTag={formatTag}
           theme={theme}
           onSelectCell={handleSelectCell}
+          onNeedMoreRows={handleNeedMoreRows}
         />
 
         {/* Right Sidebar (Variant Summary, Cohorts & Filters, Cell Inspector) */}
@@ -496,6 +592,14 @@ export default function App() {
         isOpen={isHelpModalOpen}
         onClose={() => setIsHelpModalOpen(false)}
         theme={theme}
+      />
+
+      {/* Genomic Locus & Gene Jumper Modal */}
+      <JumpModal
+        isOpen={isJumpModalOpen}
+        onClose={() => setIsJumpModalOpen(false)}
+        theme={theme}
+        onJump={handleJumpLocus}
       />
     </div>
   );

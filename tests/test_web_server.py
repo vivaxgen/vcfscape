@@ -115,6 +115,64 @@ class TestWebServer(unittest.TestCase):
         is_authed, _ = handler._is_authenticated()
         self.assertTrue(is_authed)
 
+    def test_streaming_endpoints_handling(self):
+        from vcfscape.core.vcf_reader import VcfReader
+        from vcfscape.core.cohorts import CohortManager
+        example_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "examples", "pf3d7_surveillance_demo.vcf")
+        )
+        reader = VcfReader(example_path, lazy=True)
+        cohort_manager = CohortManager(reader.samples)
+
+        class MockServer:
+            pass
+
+        server_inst = MockServer()
+        server_inst.auth_token = None
+        server_inst.vcf_reader = reader
+        server_inst.cohort_manager = cohort_manager
+        server_inst.vcf_payload = None
+
+        class MockWriter:
+            def __init__(self):
+                self.data = bytearray()
+            def write(self, b):
+                self.data.extend(b)
+
+        handler = SpaStaticHTTPHandler.__new__(SpaStaticHTTPHandler)
+        handler.server = server_inst
+        handler.wfile = MockWriter()
+        handler.send_response = lambda code: None
+        handler.send_header = lambda k, v: None
+        handler.end_headers = lambda: None
+
+        # Test /api/metadata
+        handler.path = "/api/metadata"
+        handler.do_GET()
+        import json
+        meta = json.loads(handler.wfile.data.decode("utf-8"))
+        self.assertTrue(meta["hasCustomVcf"])
+        self.assertEqual(meta["totalVariants"], reader.total_variants)
+        self.assertEqual(len(meta["samples"]), len(reader.samples))
+
+        # Test /api/variants?offset=0&limit=5
+        handler.wfile = MockWriter()
+        handler.path = "/api/variants?offset=0&limit=5"
+        handler.do_GET()
+        slice_data = json.loads(handler.wfile.data.decode("utf-8"))
+        self.assertEqual(slice_data["offset"], 0)
+        self.assertEqual(slice_data["limit"], 5)
+        self.assertLessEqual(len(slice_data["variants"]), 5)
+        self.assertEqual(slice_data["totalVariants"], reader.total_variants)
+
+        # Test /api/region
+        handler.wfile = MockWriter()
+        handler.path = "/api/region?chrom=Pf3D7_07_v3&start=400000&end=410000"
+        handler.do_GET()
+        region_data = json.loads(handler.wfile.data.decode("utf-8"))
+        self.assertEqual(region_data["chrom"], "Pf3D7_07_v3")
+        self.assertIn("variants", region_data)
+
 
 if __name__ == "__main__":
     unittest.main()

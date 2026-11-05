@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for sample cohort creation, editing, cloning, inverted selection, and deletion across both Python Textual TUI and React Web interfaces.",
-  "updatedAt":  "2026-11-01T04:04:01.831355587Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Implementation plan for high-performance scaling of vcfscape on large VCF files.\nFeatures dual indexing (Tabix/CSI for bgzip and fast line-offset indexing for uncompressed VCFs), chunked API streaming, Textual TUI virtual row windowing, and React virtualized table with region jumping.",
+  "updatedAt": "2026-11-05T02:29:51.709091213Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

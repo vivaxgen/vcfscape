@@ -1,8 +1,9 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
 import { Variant, ViewMode, FormatTag, ThemeMode } from "../types/vcf";
 
 interface VariantTableProps {
   variants: Variant[];
+  totalVariantsCount?: number;
   samples: string[];
   selectedVariantIndex: number;
   selectedSampleIndex: number;
@@ -10,10 +11,12 @@ interface VariantTableProps {
   formatTag: FormatTag;
   theme: ThemeMode;
   onSelectCell: (variantIndex: number, sampleIndex: number) => void;
+  onNeedMoreRows?: (offset: number, limit: number) => void;
 }
 
 export const VariantTable: React.FC<VariantTableProps> = ({
   variants,
+  totalVariantsCount,
   samples,
   selectedVariantIndex,
   selectedSampleIndex,
@@ -21,18 +24,54 @@ export const VariantTable: React.FC<VariantTableProps> = ({
   formatTag,
   theme,
   onSelectCell,
+  onNeedMoreRows,
 }) => {
   const leftTableRef = useRef<HTMLDivElement>(null);
   const rightTableRef = useRef<HTMLDivElement>(null);
   const isSyncingRef = useRef<boolean>(false);
+  const lastRequestedOffsetRef = useRef<number>(-1);
   const isLight = theme === "light";
+
+  const ROW_HEIGHT = 28; // exactly 28px per row
+  const OVERSCAN = 20;   // render 20 rows above and below viewport for fluid scrolling
+
+  const [scrollTop, setScrollTop] = useState<number>(0);
+  const [viewportHeight, setViewportHeight] = useState<number>(600);
+
+  // Initialize and update viewport height on resize
+  useEffect(() => {
+    const updateHeight = () => {
+      if (leftTableRef.current) {
+        setViewportHeight(leftTableRef.current.clientHeight || 600);
+      }
+    };
+    updateHeight();
+    window.addEventListener("resize", updateHeight);
+    return () => window.removeEventListener("resize", updateHeight);
+  }, []);
+
+  // Check if approaching bottom of loaded variants and request more from backend
+  const checkNeedMoreRows = useCallback((currentScrollTop: number) => {
+    if (!onNeedMoreRows) return;
+    const totalCount = totalVariantsCount && totalVariantsCount > variants.length ? totalVariantsCount : variants.length;
+    const estBottomRow = Math.ceil((currentScrollTop + viewportHeight) / ROW_HEIGHT);
+    if (estBottomRow >= variants.length - 40 && variants.length < totalCount) {
+      if (lastRequestedOffsetRef.current !== variants.length) {
+        lastRequestedOffsetRef.current = variants.length;
+        onNeedMoreRows(variants.length, 100);
+      }
+    }
+  }, [onNeedMoreRows, totalVariantsCount, variants.length, viewportHeight, ROW_HEIGHT]);
 
   // Synchronize vertical scroll from Left to Right
   const handleLeftScroll = () => {
     if (isSyncingRef.current) return;
     isSyncingRef.current = true;
     if (leftTableRef.current && rightTableRef.current) {
-      rightTableRef.current.scrollTop = leftTableRef.current.scrollTop;
+      const top = leftTableRef.current.scrollTop;
+      rightTableRef.current.scrollTop = top;
+      setScrollTop(top);
+      checkNeedMoreRows(top);
     }
     requestAnimationFrame(() => {
       isSyncingRef.current = false;
@@ -44,7 +83,10 @@ export const VariantTable: React.FC<VariantTableProps> = ({
     if (isSyncingRef.current) return;
     isSyncingRef.current = true;
     if (leftTableRef.current && rightTableRef.current) {
-      leftTableRef.current.scrollTop = rightTableRef.current.scrollTop;
+      const top = rightTableRef.current.scrollTop;
+      leftTableRef.current.scrollTop = top;
+      setScrollTop(top);
+      checkNeedMoreRows(top);
     }
     requestAnimationFrame(() => {
       isSyncingRef.current = false;
@@ -58,6 +100,8 @@ export const VariantTable: React.FC<VariantTableProps> = ({
         const newTop = leftTableRef.current.scrollTop + e.deltaY;
         leftTableRef.current.scrollTop = newTop;
         rightTableRef.current.scrollTop = newTop;
+        setScrollTop(newTop);
+        checkNeedMoreRows(newTop);
       }
     }
   };
@@ -65,23 +109,24 @@ export const VariantTable: React.FC<VariantTableProps> = ({
   // Auto-scroll selected row into view synchronously
   useEffect(() => {
     if (leftTableRef.current && rightTableRef.current) {
-      const rowHeight = 28; // exactly 28px per row
-      const targetTop = selectedVariantIndex * rowHeight;
+      const targetTop = selectedVariantIndex * ROW_HEIGHT;
       const currentTop = leftTableRef.current.scrollTop;
-      const viewportHeight = leftTableRef.current.clientHeight - 32; // subtract header
+      const vpHeight = leftTableRef.current.clientHeight - 32;
 
       if (targetTop < currentTop) {
         leftTableRef.current.scrollTop = targetTop;
         rightTableRef.current.scrollTop = targetTop;
-      } else if (targetTop + rowHeight > currentTop + viewportHeight) {
-        const scrollTo = targetTop + rowHeight - viewportHeight;
+        setScrollTop(targetTop);
+      } else if (targetTop + ROW_HEIGHT > currentTop + vpHeight) {
+        const scrollTo = targetTop + ROW_HEIGHT - vpHeight;
         leftTableRef.current.scrollTop = scrollTo;
         rightTableRef.current.scrollTop = scrollTo;
+        setScrollTop(scrollTo);
       }
     }
-  }, [selectedVariantIndex]);
+  }, [selectedVariantIndex, ROW_HEIGHT]);
 
-  // Auto-scroll selected sample column horizontally into view when selection cursor moves outside viewport
+  // Auto-scroll selected sample column horizontally into view
   useEffect(() => {
     const handleHorizontalScroll = () => {
       if (!rightTableRef.current || selectedSampleIndex < 0 || selectedSampleIndex >= samples.length) {
@@ -89,30 +134,24 @@ export const VariantTable: React.FC<VariantTableProps> = ({
       }
 
       const container = rightTableRef.current;
-
-      // Fast-path: scroll directly to beginning if first sample selected
       if (selectedSampleIndex === 0) {
         container.scrollLeft = 0;
         return;
       }
 
-      // Find the corresponding header element for the selected sample column
       const ths = container.querySelectorAll("thead th");
       const targetTh = ths[selectedSampleIndex] as HTMLElement | undefined;
       if (!targetTh) return;
 
       const containerRect = container.getBoundingClientRect();
       const thRect = targetTh.getBoundingClientRect();
-
       const halfScreen = Math.floor(container.clientWidth / 2);
 
       if (thRect.left < containerRect.left) {
-        // Selection cursor moved beyond the left edge of viewport: scroll half screen to the left
         const cellLeftInContainer = container.scrollLeft + (thRect.left - containerRect.left);
         const targetScroll = Math.max(0, Math.min(container.scrollLeft - halfScreen, cellLeftInContainer - 16));
         container.scrollLeft = targetScroll;
       } else if (thRect.right > containerRect.right) {
-        // Selection cursor moved beyond the right edge of viewport: scroll half screen to the right
         const cellRightInContainer = container.scrollLeft + (thRect.right - containerRect.left);
         const targetScroll = Math.max(container.scrollLeft + halfScreen, cellRightInContainer - container.clientWidth + 16);
         container.scrollLeft = targetScroll;
@@ -120,7 +159,6 @@ export const VariantTable: React.FC<VariantTableProps> = ({
     };
 
     handleHorizontalScroll();
-
     window.addEventListener("resize", handleHorizontalScroll);
     return () => window.removeEventListener("resize", handleHorizontalScroll);
   }, [selectedSampleIndex, samples.length, formatTag, viewMode]);
@@ -141,6 +179,15 @@ export const VariantTable: React.FC<VariantTableProps> = ({
 
   const fixedCols = getFixedColumns();
 
+  // Virtual Row Slice Calculation
+  const totalCount = totalVariantsCount && totalVariantsCount > variants.length ? totalVariantsCount : variants.length;
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const endIndex = Math.min(variants.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
+
+  const topPadHeight = startIndex * ROW_HEIGHT;
+  const bottomPadHeight = Math.max(0, (totalCount - endIndex) * ROW_HEIGHT);
+  const visibleVariants = variants.slice(startIndex, endIndex);
+
   // Helper to format sample cell value & color
   const renderSampleValue = (v: Variant, sampleId: string) => {
     const sData = v.samples[sampleId];
@@ -159,7 +206,6 @@ export const VariantTable: React.FC<VariantTableProps> = ({
       const parts = gtStr.replace("|", "/").split("/");
       const uniqueAlleles = new Set(parts);
       if (uniqueAlleles.size > 1) {
-        // Polyclonal / Heterozygous infection (malaria marker)
         return (
           <span className={`${isLight ? "text-purple-700" : "text-fuchsia-400"} font-bold font-mono`}>
             {gtStr}
@@ -248,7 +294,13 @@ export const VariantTable: React.FC<VariantTableProps> = ({
             </tr>
           </thead>
           <tbody>
-            {variants.map((v, vIdx) => {
+            {topPadHeight > 0 && (
+              <tr style={{ height: `${topPadHeight}px` }}>
+                <td colSpan={fixedCols.length} />
+              </tr>
+            )}
+            {visibleVariants.map((v, localIdx) => {
+              const vIdx = startIndex + localIdx;
               const isRowSelected = selectedVariantIndex === vIdx;
               const isEven = vIdx % 2 === 0;
               const rowBg = isRowSelected
@@ -267,7 +319,7 @@ export const VariantTable: React.FC<VariantTableProps> = ({
 
               return (
                 <tr
-                  key={v.id}
+                  key={v.id || `var_${vIdx}`}
                   onClick={() => onSelectCell(vIdx, selectedSampleIndex)}
                   className={`${rowBg} ${
                     isLight ? "hover:bg-blue-50/70" : "hover:bg-slate-800/60"
@@ -362,6 +414,11 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                 </tr>
               );
             })}
+            {bottomPadHeight > 0 && (
+              <tr style={{ height: `${bottomPadHeight}px` }}>
+                <td colSpan={fixedCols.length} />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -417,7 +474,13 @@ export const VariantTable: React.FC<VariantTableProps> = ({
             </tr>
           </thead>
           <tbody>
-            {variants.map((v, vIdx) => {
+            {topPadHeight > 0 && (
+              <tr style={{ height: `${topPadHeight}px` }}>
+                <td colSpan={samples.length} />
+              </tr>
+            )}
+            {visibleVariants.map((v, localIdx) => {
+              const vIdx = startIndex + localIdx;
               const isRowSelected = selectedVariantIndex === vIdx;
               const isEven = vIdx % 2 === 0;
               const rowBg = isRowSelected
@@ -434,7 +497,7 @@ export const VariantTable: React.FC<VariantTableProps> = ({
 
               return (
                 <tr
-                  key={v.id}
+                  key={v.id || `srow_${vIdx}`}
                   className={`${rowBg} ${
                     isLight ? "hover:bg-blue-50/70" : "hover:bg-slate-800/60"
                   } transition-colors border-none h-7 min-h-[28px] max-h-[28px] overflow-hidden`}
@@ -462,6 +525,11 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                 </tr>
               );
             })}
+            {bottomPadHeight > 0 && (
+              <tr style={{ height: `${bottomPadHeight}px` }}>
+                <td colSpan={samples.length} />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

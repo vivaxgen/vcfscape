@@ -16,7 +16,7 @@ from http.cookies import SimpleCookie
 from typing import Optional, Dict, Any, Tuple
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from vcfscape.core.vcf_reader import VcfReader
+from vcfscape.core.vcf_reader import VcfReader, VariantRecord
 from vcfscape.core.cohorts import CohortManager
 
 __version__ = "0.1.0"
@@ -52,46 +52,49 @@ def get_fqdn() -> str:
         return "localhost"
 
 
-def load_vcf_payload(vcf_path: str) -> Dict[str, Any]:
+def serialize_variant_record(idx: int, r: VariantRecord) -> Dict[str, Any]:
+    """Serialize a single VariantRecord into JSON format expected by web interface."""
+    return {
+        "id": f"var_{idx}_{r.chrom}_{r.pos}",
+        "chrom": r.chrom,
+        "pos": r.pos,
+        "varId": r.var_id or ".",
+        "ref": r.ref,
+        "alt": r.alt,
+        "qual": r.qual if r.qual is not None else 0,
+        "filter": r.filter,
+        "gene": r.gene,
+        "impact": r.impact,
+        "mutation": r.mutation,
+        "drug": r.drug if r.drug and r.drug != "." else None,
+        "drugStatus": r.drug_annotation.status if r.drug_annotation else None,
+        "drugDetails": r.drug_annotation.details if r.drug_annotation else None,
+        "varType": r.var_type,
+        "info": {str(k): str(v) for k, v in r.info.items()},
+        "formatKeys": r.format_keys,
+        "samples": {
+            s: {
+                "GT": str(sdata.get("GT", "./.")),
+                "DP": int(sdata.get("DP", 0)) if isinstance(sdata.get("DP"), (int, float)) or str(sdata.get("DP", "")).isdigit() else 0,
+                "AD": str(sdata.get("AD", ".")),
+                "GQ": int(sdata.get("GQ", 0)) if isinstance(sdata.get("GQ"), (int, float)) or str(sdata.get("GQ", "")).isdigit() else 0,
+                "PL": str(sdata.get("PL", "")) if "PL" in sdata else None,
+            }
+            for s, sdata in r.sample_data.items()
+        },
+    }
+
+
+def load_vcf_payload(vcf_path: str, max_records: int = 500) -> Dict[str, Any]:
     """Parse input VCF file and structure data matching the web interface schema."""
     if not os.path.exists(vcf_path):
         raise FileNotFoundError(f"VCF file not found: {vcf_path}")
 
-    reader = VcfReader(vcf_path)
-    records = reader.get_records()
+    reader = VcfReader(vcf_path, lazy=True)
+    records = reader.get_slice(0, max_records)
     cohort_manager = CohortManager(reader.samples)
 
-    variants_json = []
-    for idx, r in enumerate(records):
-        variants_json.append({
-            "id": f"var_{idx}_{r.chrom}_{r.pos}",
-            "chrom": r.chrom,
-            "pos": r.pos,
-            "varId": r.var_id or ".",
-            "ref": r.ref,
-            "alt": r.alt,
-            "qual": r.qual if r.qual is not None else 0,
-            "filter": r.filter,
-            "gene": r.gene,
-            "impact": r.impact,
-            "mutation": r.mutation,
-            "drug": r.drug if r.drug and r.drug != "." else None,
-            "drugStatus": r.drug_annotation.status if r.drug_annotation else None,
-            "drugDetails": r.drug_annotation.details if r.drug_annotation else None,
-            "varType": r.var_type,
-            "info": {str(k): str(v) for k, v in r.info.items()},
-            "formatKeys": r.format_keys,
-            "samples": {
-                s: {
-                    "GT": str(sdata.get("GT", "./.")),
-                    "DP": int(sdata.get("DP", 0)) if isinstance(sdata.get("DP"), (int, float)) or str(sdata.get("DP", "")).isdigit() else 0,
-                    "AD": str(sdata.get("AD", ".")),
-                    "GQ": int(sdata.get("GQ", 0)) if isinstance(sdata.get("GQ"), (int, float)) or str(sdata.get("GQ", "")).isdigit() else 0,
-                    "PL": str(sdata.get("PL", "")) if "PL" in sdata else None,
-                }
-                for s, sdata in r.sample_data.items()
-            },
-        })
+    variants_json = [serialize_variant_record(idx, r) for idx, r in enumerate(records)]
 
     cohorts_json = [
         {
@@ -106,10 +109,11 @@ def load_vcf_payload(vcf_path: str) -> Dict[str, Any]:
 
     return {
         "filename": os.path.basename(vcf_path),
-        "totalVariants": len(records),
+        "totalVariants": reader.total_variants,
         "totalSamples": len(reader.samples),
         "backend": reader.backend,
         "samples": reader.samples,
+        "contigs": reader.contigs,
         "cohorts": cohorts_json,
         "variants": variants_json,
     }
@@ -374,7 +378,117 @@ class SpaStaticHTTPHandler(SimpleHTTPRequestHandler):
             self.wfile.write(resp)
             return
 
-        # API endpoint providing the parsed VCF dataset from the command line
+        # Parse query params
+        parsed_url = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed_url.query)
+
+        # 1. API endpoint: Dataset Metadata
+        if clean_path in ("/api/metadata", "/api/meta"):
+            reader = getattr(self.server, "vcf_reader", None)
+            cohort_manager = getattr(self.server, "cohort_manager", None)
+            if reader is not None:
+                cohorts_json = [
+                    {
+                        "name": c.name,
+                        "sampleIds": c.sample_ids,
+                        "description": c.description,
+                        "active": c.active,
+                        "color": c.color,
+                    }
+                    for c in (cohort_manager.cohorts.values() if cohort_manager else [])
+                ]
+                resp_data = {
+                    "hasCustomVcf": True,
+                    "filename": os.path.basename(reader.filepath),
+                    "totalVariants": reader.total_variants,
+                    "totalSamples": len(reader.samples),
+                    "backend": reader.backend,
+                    "samples": reader.samples,
+                    "contigs": reader.contigs,
+                    "cohorts": cohorts_json,
+                }
+            else:
+                resp_data = {"hasCustomVcf": False}
+
+            resp = json.dumps(resp_data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(resp)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(resp)
+            return
+
+        # 2. API endpoint: Windowed Variant Slices (for infinite / virtual scroll)
+        if clean_path == "/api/variants":
+            reader = getattr(self.server, "vcf_reader", None)
+            if reader is None:
+                resp = json.dumps({"error": "No VCF loaded", "variants": []}).encode("utf-8")
+            else:
+                try:
+                    offset = max(0, int(qs.get("offset", [0])[0]))
+                    limit = min(500, max(1, int(qs.get("limit", [100])[0])))
+                except ValueError:
+                    offset = 0
+                    limit = 100
+
+                records = reader.get_slice(offset, limit)
+                variants_json = [serialize_variant_record(offset + i, r) for i, r in enumerate(records)]
+                resp_data = {
+                    "offset": offset,
+                    "limit": limit,
+                    "totalVariants": reader.total_variants,
+                    "variants": variants_json,
+                }
+                resp = json.dumps(resp_data).encode("utf-8")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(resp)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(resp)
+            return
+
+        # 3. API endpoint: Genomic Region Query (for Jump to Coordinate / Gene)
+        if clean_path == "/api/region":
+            reader = getattr(self.server, "vcf_reader", None)
+            if reader is None:
+                resp = json.dumps({"error": "No VCF loaded", "variants": []}).encode("utf-8")
+            else:
+                chrom = qs.get("chrom", [""])[0]
+                try:
+                    start = int(qs.get("start", [0])[0])
+                    end = int(qs.get("end", [1000000000])[0])
+                    limit = min(500, int(qs.get("limit", [200])[0]))
+                except ValueError:
+                    start = 0
+                    end = 1000000000
+                    limit = 200
+
+                records = reader.query_region(chrom, start, end, limit)
+                variants_json = [serialize_variant_record(i, r) for i, r in enumerate(records)]
+                resp_data = {
+                    "chrom": chrom,
+                    "start": start,
+                    "end": end,
+                    "count": len(records),
+                    "variants": variants_json,
+                }
+                resp = json.dumps(resp_data).encode("utf-8")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(resp)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(resp)
+            return
+
+        # 4. Backward-compatible API endpoint
         if clean_path in ("/api/vcf-data", "/api/data"):
             payload = getattr(self.server, "vcf_payload", None)
             if payload is not None:
@@ -431,11 +545,16 @@ def run_web_server(
         sys.exit(1)
 
     vcf_payload = None
+    vcf_reader = None
+    cohort_manager = None
+
     if vcf_path:
         try:
-            print(f"Reading input VCF: {vcf_path}...")
-            vcf_payload = load_vcf_payload(vcf_path)
-            print(f"Loaded {vcf_payload['totalVariants']} variants across {vcf_payload['totalSamples']} samples.")
+            print(f"Opening input VCF: {vcf_path}...")
+            vcf_reader = VcfReader(vcf_path, lazy=True)
+            cohort_manager = CohortManager(vcf_reader.samples)
+            vcf_payload = load_vcf_payload(vcf_path, max_records=200)
+            print(f"Ready: {vcf_reader.total_variants} variants across {len(vcf_reader.samples)} samples (backend: {vcf_reader.backend}).")
         except Exception as e:
             sys.stderr.write(f"Error reading VCF file '{vcf_path}': {e}\n")
             sys.exit(1)
@@ -468,6 +587,8 @@ def run_web_server(
         server = ThreadingHTTPServer((host, active_port), handler)
         server.auth_token = auth_token
         server.vcf_payload = vcf_payload
+        server.vcf_reader = vcf_reader
+        server.cohort_manager = cohort_manager
     except OSError as e:
         sys.stderr.write(f"Failed to bind to {host}:{active_port}: {e}\n")
         sys.exit(1)

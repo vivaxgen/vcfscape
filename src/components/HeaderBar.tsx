@@ -1,6 +1,6 @@
 import React, { useRef } from "react";
 import { ViewMode, FormatTag, ThemeMode } from "../types/vcf";
-import { Download, HelpCircle, Sun, Moon, FolderOpen, ShieldCheck } from "lucide-react";
+import { Download, HelpCircle, Sun, Moon, FolderOpen, ShieldCheck, MapPin } from "lucide-react";
 
 interface HeaderBarProps {
   filename: string;
@@ -14,6 +14,7 @@ interface HeaderBarProps {
   onOpenPixiGuide: () => void;
   onOpenHelp: () => void;
   onOpenFile?: (file: File) => void;
+  onOpenJumpModal?: () => void;
 }
 
 export const HeaderBar: React.FC<HeaderBarProps> = ({
@@ -28,6 +29,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   onOpenPixiGuide,
   onOpenHelp,
   onOpenFile,
+  onOpenJumpModal,
 }) => {
   const isLight = theme === "light";
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -131,6 +133,25 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           <FolderOpen className="w-3 h-3" />
           <span>Open VCF</span>
         </button>
+
+        {/* Jump to Locus / Gene modal */}
+        {onOpenJumpModal && (
+          <button
+            onClick={onOpenJumpModal}
+            className={`flex items-center space-x-1 px-2 py-0.5 rounded-xs text-[11px] font-mono border transition-colors ${
+              isLight
+                ? "bg-sky-50 hover:bg-sky-100 text-sky-800 border-sky-300 shadow-2xs"
+                : "bg-[#0f172a] hover:bg-[#334155] text-sky-300 border-sky-500/30"
+            }`}
+            title="Jump to Genomic Locus / Gene (HotKey: 'g')"
+          >
+            <MapPin className="w-3 h-3 text-sky-400" />
+            <span>Jump Locus</span>
+            <kbd className={`px-1 py-0.2 rounded-2xs text-[9px] border ${isLight ? "bg-slate-100 text-slate-600 border-slate-300" : "bg-slate-800 text-slate-400 border-slate-700"}`}>
+              g
+            </kbd>
+          </button>
+        )}
 
         {/* Dark/Light Theme Toggle with 't' hotkey cue */}
         <button
