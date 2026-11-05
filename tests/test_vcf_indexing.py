@@ -120,6 +120,34 @@ class TestVcfIndexing(unittest.TestCase):
             self.assertGreaterEqual(r.pos, 405000)
             self.assertLessEqual(r.pos, 406000)
 
+    def test_lazy_streaming_filter_records(self):
+        reader = VcfReader(self.vcf_path, lazy=True)
+        # Filter with limit
+        filtered = reader.filter_records(variant_type="SNP", limit=10)
+        self.assertEqual(len(filtered), 10)
+        for r in filtered:
+            self.assertIn("SNP", r.var_type)
+
+    def test_async_background_counting_and_callback(self):
+        # Create a gzipped test file
+        import gzip
+        gz_path = os.path.join(self.temp_dir.name, "test_async.vcf.gz")
+        with open(self.vcf_path, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+            f_out.writelines(f_in)
+
+        reader = VcfReader(gz_path, lazy=True)
+        received_count = []
+
+        def on_counted(count):
+            received_count.append(count)
+
+        reader.add_total_variants_callback(on_counted)
+        # Verify total_variants returns correct count even when called directly
+        total = reader.total_variants
+        self.assertEqual(total, 2500)
+        self.assertTrue(reader.total_variants_ready)
+        self.assertIn(2500, received_count)
+
 
 if __name__ == "__main__":
     unittest.main()

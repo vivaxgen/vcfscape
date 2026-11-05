@@ -54,19 +54,16 @@ class VcfscapeApp(App):
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
 
         # Widgets
+        provisional_variants = self.reader.get_total_variants_async()
         self.header_bar = HeaderBar(
             filename=os.path.basename(vcf_path),
-            total_variants=self.reader.total_variants,
+            total_variants=provisional_variants,
             total_samples=self.reader.total_samples,
         )
         self.header_bar.backend = self.reader.backend
 
         # True split with virtual buffer: left fixed columns + right scrollable samples
-        initial_slice = (
-            self.reader.get_slice(0, 150)
-            if self.reader.total_variants > 150
-            else self.reader.get_records()
-        )
+        initial_slice = self.reader.get_slice(0, 150)
         self.table_widget = VariantSplitView(
             records=initial_slice,
             samples=self.reader.samples,
@@ -75,6 +72,20 @@ class VcfscapeApp(App):
         self.sidebar_panel = SidebarPanel(self.cohort_manager)
         self.stats_pane = CohortStatsPane(self.cohort_manager)
         self.footer_bar = FooterBar()
+
+        # If counting in background, update header bar and table when ready
+        if not self.reader.total_variants_ready:
+            self.reader.add_total_variants_callback(self._on_total_variants_ready)
+
+    def _on_total_variants_ready(self, total: int):
+        try:
+            self.call_from_thread(self._apply_total_variants, total)
+        except Exception:
+            pass
+
+    def _apply_total_variants(self, total: int):
+        self.header_bar.total_variants = total
+        self.table_widget.update_total_variants(total)
 
     def compose(self) -> ComposeResult:
         yield self.header_bar

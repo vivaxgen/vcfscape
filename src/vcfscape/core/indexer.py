@@ -64,33 +64,54 @@ class SparseVcfIndex:
 
         self._load_or_build()
 
-    def _index_cache_path(self) -> str:
+    def _get_candidate_cache_paths(self) -> List[str]:
         dir_name = os.path.dirname(self.filepath)
         base_name = os.path.basename(self.filepath)
-        return os.path.join(dir_name, f".{base_name}.vcfscape.idx")
+        primary = os.path.join(dir_name, f".{base_name}.vcfscape.idx")
+        paths = [primary]
+        try:
+            import hashlib
+            cache_dir = os.path.expanduser("~/.cache/vcfscape")
+            h = hashlib.sha256(os.path.abspath(self.filepath).encode("utf-8")).hexdigest()[:16]
+            paths.append(os.path.join(cache_dir, f"{base_name}_{h}.idx"))
+        except Exception:
+            pass
+        return paths
+
+    def _index_cache_path(self) -> str:
+        paths = self._get_candidate_cache_paths()
+        # Prefer existing valid cache
+        for p in paths:
+            if os.path.exists(p):
+                return p
+        # Otherwise prefer primary if writable, else secondary
+        dir_name = os.path.dirname(self.filepath)
+        if os.access(dir_name, os.W_OK):
+            return paths[0]
+        return paths[-1] if len(paths) > 1 else paths[0]
 
     def _load_or_build(self):
-        cache_path = self._index_cache_path()
         file_mtime = os.path.getmtime(self.filepath)
+        file_size = os.path.getsize(self.filepath)
 
-        # Check if cache exists and is fresh
-        if os.path.exists(cache_path):
-            try:
-                if os.path.getmtime(cache_path) >= file_mtime:
-                    with open(cache_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if data.get("file_size") == os.path.getsize(self.filepath) and data.get("step") == self.step:
-                        self.header_end_offset = data["header_end_offset"]
-                        self.total_records = data["total_records"]
-                        self.step = data["step"]
-                        self.checkpoints = [SparseIndexEntry.from_dict(d) for d in data["checkpoints"]]
-                        self._build_chrom_lookup()
-                        return
-            except Exception:
-                pass  # Rebuild on any read error
+        for cache_path in self._get_candidate_cache_paths():
+            if os.path.exists(cache_path):
+                try:
+                    if os.path.getmtime(cache_path) >= file_mtime:
+                        with open(cache_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if data.get("file_size") == file_size and data.get("step") == self.step:
+                            self.header_end_offset = data["header_end_offset"]
+                            self.total_records = data["total_records"]
+                            self.step = data["step"]
+                            self.checkpoints = [SparseIndexEntry.from_dict(d) for d in data["checkpoints"]]
+                            self._build_chrom_lookup()
+                            return
+                except Exception:
+                    pass  # Try next or rebuild
 
         self._build_index()
-        self._save_index(cache_path)
+        self._save_index(self._index_cache_path())
 
     def _build_chrom_lookup(self):
         self.chrom_positions.clear()
@@ -100,7 +121,7 @@ class SparseVcfIndex:
             self.chrom_positions[cp.chrom].append((cp.pos, cp.index))
 
     def _build_index(self):
-        """Scans the uncompressed VCF line-by-line using buffered I/O."""
+        """Scans uncompressed VCF using high-speed 4MB chunked streaming buffer."""
         self.checkpoints = []
         self.total_records = 0
         record_idx = 0
@@ -120,18 +141,43 @@ class SparseVcfIndex:
                 f.seek(offset)
                 break
 
-            # Scan records
+            # Fast 4MB chunked scanning
+            buf_size = 4 * 1024 * 1024
+            curr_offset = self.header_end_offset
+            carry = b""
             while True:
-                line_offset = f.tell()
-                line = f.readline()
-                if not line:
+                chunk = f.read(buf_size)
+                if not chunk:
                     break
-                if not line.strip():
-                    continue
+                data = carry + chunk
+                lines = data.split(b"\n")
+                carry = lines.pop()
+                for line in lines:
+                    if not line or not line.strip():
+                        curr_offset += len(line) + 1
+                        continue
+                    if record_idx % self.step == 0:
+                        parts = line.split(b"\t", 3)
+                        if len(parts) >= 2:
+                            chrom = parts[0].decode("utf-8", errors="replace")
+                            try:
+                                pos = int(parts[1])
+                            except ValueError:
+                                pos = 0
+                            self.checkpoints.append(
+                                SparseIndexEntry(
+                                    index=record_idx,
+                                    chrom=chrom,
+                                    pos=pos,
+                                    offset=curr_offset,
+                                )
+                            )
+                    curr_offset += len(line) + 1
+                    record_idx += 1
 
+            if carry and carry.strip():
                 if record_idx % self.step == 0:
-                    # Parse chrom and pos from line
-                    parts = line.split(b"\t", 3)
+                    parts = carry.split(b"\t", 3)
                     if len(parts) >= 2:
                         chrom = parts[0].decode("utf-8", errors="replace")
                         try:
@@ -143,7 +189,7 @@ class SparseVcfIndex:
                                 index=record_idx,
                                 chrom=chrom,
                                 pos=pos,
-                                offset=line_offset,
+                                offset=curr_offset,
                             )
                         )
                 record_idx += 1
@@ -152,19 +198,21 @@ class SparseVcfIndex:
         self._build_chrom_lookup()
 
     def _save_index(self, cache_path: str):
-        try:
-            payload = {
-                "file_size": os.path.getsize(self.filepath),
-                "step": self.step,
-                "header_end_offset": self.header_end_offset,
-                "total_records": self.total_records,
-                "checkpoints": [cp.to_dict() for cp in self.checkpoints],
-            }
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f)
-        except Exception:
-            # Non-fatal if index cannot be written to disk (e.g. read-only filesystem)
-            pass
+        payload = {
+            "file_size": os.path.getsize(self.filepath),
+            "step": self.step,
+            "header_end_offset": self.header_end_offset,
+            "total_records": self.total_records,
+            "checkpoints": [cp.to_dict() for cp in self.checkpoints],
+        }
+        for target in [cache_path] + self._get_candidate_cache_paths():
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+                return
+            except Exception:
+                continue
 
     def get_seek_offset_for_index(self, target_idx: int) -> Tuple[int, int]:
         """

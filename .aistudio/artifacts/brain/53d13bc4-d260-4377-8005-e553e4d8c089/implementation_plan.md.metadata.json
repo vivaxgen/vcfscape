@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for high-performance scaling of vcfscape on large VCF files.\nFeatures dual indexing (Tabix/CSI for bgzip and fast line-offset indexing for uncompressed VCFs), chunked API streaming, Textual TUI virtual row windowing, and React virtualized table with region jumping.",
-  "updatedAt": "2026-11-05T02:29:51.709091213Z",
+  "summary": "Comprehensive architectural plan to eliminate startup freezes and make pointer/cursor movement instantaneous across both Textual TUI and Web versions when handling very big VCF files. Incorporates asynchronous background variant counting, chunked sparse indexing with user-cache fallback, dynamic horizontal column windowing in Textual, seamless buffer shifting, and in-browser streaming safeguards.",
+  "updatedAt": "2026-11-05T18:30:07.287253628Z",
   "requestFeedback": true,
   "userFacing": true
 }

@@ -34,20 +34,27 @@ export const VariantTable: React.FC<VariantTableProps> = ({
 
   const ROW_HEIGHT = 28; // exactly 28px per row
   const OVERSCAN = 20;   // render 20 rows above and below viewport for fluid scrolling
+  const SAMPLE_COL_WIDTH = 66; // 66px per sample column
+  const COL_OVERSCAN = 8;      // overscan columns left/right
 
   const [scrollTop, setScrollTop] = useState<number>(0);
   const [viewportHeight, setViewportHeight] = useState<number>(600);
+  const [scrollLeft, setScrollLeft] = useState<number>(0);
+  const [viewportWidth, setViewportWidth] = useState<number>(800);
 
-  // Initialize and update viewport height on resize
+  // Initialize and update viewport height and width on resize
   useEffect(() => {
-    const updateHeight = () => {
+    const updateDimensions = () => {
       if (leftTableRef.current) {
         setViewportHeight(leftTableRef.current.clientHeight || 600);
       }
+      if (rightTableRef.current) {
+        setViewportWidth(rightTableRef.current.clientWidth || 800);
+      }
     };
-    updateHeight();
-    window.addEventListener("resize", updateHeight);
-    return () => window.removeEventListener("resize", updateHeight);
+    updateDimensions();
+    window.addEventListener("resize", updateDimensions);
+    return () => window.removeEventListener("resize", updateDimensions);
   }, []);
 
   // Check if approaching bottom of loaded variants and request more from backend
@@ -78,8 +85,11 @@ export const VariantTable: React.FC<VariantTableProps> = ({
     });
   };
 
-  // Synchronize vertical scroll from Right to Left
+  // Synchronize vertical scroll from Right to Left and track horizontal scrollLeft
   const handleRightScroll = () => {
+    if (rightTableRef.current) {
+      setScrollLeft(rightTableRef.current.scrollLeft);
+    }
     if (isSyncingRef.current) return;
     isSyncingRef.current = true;
     if (leftTableRef.current && rightTableRef.current) {
@@ -252,6 +262,20 @@ export const VariantTable: React.FC<VariantTableProps> = ({
 
     return <span className="font-mono">{String(val)}</span>;
   };
+
+  // Horizontal Sample Column Virtualization
+  const isColumnVirtual = samples.length > 30;
+  const startColIndex = isColumnVirtual
+    ? Math.max(0, Math.floor(scrollLeft / SAMPLE_COL_WIDTH) - COL_OVERSCAN)
+    : 0;
+  const endColIndex = isColumnVirtual
+    ? Math.min(samples.length, Math.ceil((scrollLeft + viewportWidth) / SAMPLE_COL_WIDTH) + COL_OVERSCAN)
+    : samples.length;
+
+  const leftPadWidth = isColumnVirtual ? startColIndex * SAMPLE_COL_WIDTH : 0;
+  const rightPadWidth = isColumnVirtual ? Math.max(0, (samples.length - endColIndex) * SAMPLE_COL_WIDTH) : 0;
+  const visibleSamples = isColumnVirtual ? samples.slice(startColIndex, endColIndex) : samples;
+  const totalColsSpan = visibleSamples.length + (leftPadWidth > 0 ? 1 : 0) + (rightPadWidth > 0 ? 1 : 0);
 
   return (
     <div className={`flex-1 flex overflow-hidden border-none ${isLight ? "bg-white" : "bg-[#0b0f17]"}`}>
@@ -451,7 +475,9 @@ export const VariantTable: React.FC<VariantTableProps> = ({
             }`}
           >
             <tr className="h-8">
-              {samples.map((s, sIdx) => {
+              {leftPadWidth > 0 && <th style={{ width: `${leftPadWidth}px`, minWidth: `${leftPadWidth}px` }} className="p-0 border-none" />}
+              {visibleSamples.map((s, idx) => {
+                const sIdx = startColIndex + idx;
                 const isSampleSelected = selectedSampleIndex === sIdx;
                 return (
                   <th
@@ -471,12 +497,13 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                   </th>
                 );
               })}
+              {rightPadWidth > 0 && <th style={{ width: `${rightPadWidth}px`, minWidth: `${rightPadWidth}px` }} className="p-0 border-none" />}
             </tr>
           </thead>
           <tbody>
             {topPadHeight > 0 && (
               <tr style={{ height: `${topPadHeight}px` }}>
-                <td colSpan={samples.length} />
+                <td colSpan={totalColsSpan} />
               </tr>
             )}
             {visibleVariants.map((v, localIdx) => {
@@ -502,7 +529,9 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                     isLight ? "hover:bg-blue-50/70" : "hover:bg-slate-800/60"
                   } transition-colors border-none h-7 min-h-[28px] max-h-[28px] overflow-hidden`}
                 >
-                  {samples.map((s, sIdx) => {
+                  {leftPadWidth > 0 && <td style={{ width: `${leftPadWidth}px`, minWidth: `${leftPadWidth}px` }} className="p-0 border-none" />}
+                  {visibleSamples.map((s, idx) => {
+                    const sIdx = startColIndex + idx;
                     const isCellActive = isRowSelected && selectedSampleIndex === sIdx;
                     return (
                       <td
@@ -522,12 +551,13 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                       </td>
                     );
                   })}
+                  {rightPadWidth > 0 && <td style={{ width: `${rightPadWidth}px`, minWidth: `${rightPadWidth}px` }} className="p-0 border-none" />}
                 </tr>
               );
             })}
             {bottomPadHeight > 0 && (
               <tr style={{ height: `${bottomPadHeight}px` }}>
-                <td colSpan={samples.length} />
+                <td colSpan={totalColsSpan} />
               </tr>
             )}
           </tbody>

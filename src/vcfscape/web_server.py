@@ -107,9 +107,11 @@ def load_vcf_payload(vcf_path: str, max_records: int = 500) -> Dict[str, Any]:
         for c in cohort_manager.cohorts.values()
     ]
 
+    total_v = reader.get_total_variants_async() if hasattr(reader, "get_total_variants_async") and reader.get_total_variants_async() is not None else (reader.total_variants if hasattr(reader, "total_variants_ready") and reader.total_variants_ready else len(records))
+
     return {
         "filename": os.path.basename(vcf_path),
-        "totalVariants": reader.total_variants,
+        "totalVariants": total_v,
         "totalSamples": len(reader.samples),
         "backend": reader.backend,
         "samples": reader.samples,
@@ -397,10 +399,11 @@ class SpaStaticHTTPHandler(SimpleHTTPRequestHandler):
                     }
                     for c in (cohort_manager.cohorts.values() if cohort_manager else [])
                 ]
+                total_v = reader.get_total_variants_async() if hasattr(reader, "get_total_variants_async") and reader.get_total_variants_async() is not None else (reader.total_variants if hasattr(reader, "total_variants_ready") and reader.total_variants_ready else None)
                 resp_data = {
                     "hasCustomVcf": True,
                     "filename": os.path.basename(reader.filepath),
-                    "totalVariants": reader.total_variants,
+                    "totalVariants": total_v,
                     "totalSamples": len(reader.samples),
                     "backend": reader.backend,
                     "samples": reader.samples,
@@ -435,10 +438,11 @@ class SpaStaticHTTPHandler(SimpleHTTPRequestHandler):
 
                 records = reader.get_slice(offset, limit)
                 variants_json = [serialize_variant_record(offset + i, r) for i, r in enumerate(records)]
+                total_v = reader.get_total_variants_async() if hasattr(reader, "get_total_variants_async") and reader.get_total_variants_async() is not None else (reader.total_variants if hasattr(reader, "total_variants_ready") and reader.total_variants_ready else None)
                 resp_data = {
                     "offset": offset,
                     "limit": limit,
-                    "totalVariants": reader.total_variants,
+                    "totalVariants": total_v,
                     "variants": variants_json,
                 }
                 resp = json.dumps(resp_data).encode("utf-8")
@@ -554,7 +558,9 @@ def run_web_server(
             vcf_reader = VcfReader(vcf_path, lazy=True)
             cohort_manager = CohortManager(vcf_reader.samples)
             vcf_payload = load_vcf_payload(vcf_path, max_records=200)
-            print(f"Ready: {vcf_reader.total_variants} variants across {len(vcf_reader.samples)} samples (backend: {vcf_reader.backend}).")
+            ready_vars = vcf_reader.get_total_variants_async() if hasattr(vcf_reader, "get_total_variants_async") else None
+            count_str = f"{ready_vars:,} variants" if isinstance(ready_vars, int) else "streaming variants (counting in background)"
+            print(f"Ready: {count_str} across {len(vcf_reader.samples)} samples (backend: {vcf_reader.backend}).")
         except Exception as e:
             sys.stderr.write(f"Error reading VCF file '{vcf_path}': {e}\n")
             sys.exit(1)

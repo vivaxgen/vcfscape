@@ -1,138 +1,143 @@
-# Implementation Plan: High-Performance Big VCF Handling & Virtual Windowing
+# High-Performance VCF Engine: Fast Startup & Instant Pointer Movement
 
-## 1. Executive Summary
-
-This plan outlines the architecture and implementation steps to scale **vcfscape** (both the Textual TUI and Web interface) to handle massive VCF datasets (100,000+ variants, hundreds to thousands of samples/isolates, and multi-gigabyte files). 
-
-The goal is to achieve **near-instant startup (< 200ms)** and **fluid 60 FPS scrolling and zooming** by moving away from eager whole-file loading and replacing it with:
-1. **Dual Indexing Engine**: Native Tabix/CSI indexing for bgzipped VCFs (`.vcf.gz`), alongside a lightweight sparse byte-offset index for uncompressed `.vcf` files.
-2. **Windowed / Paginated Backend API**: A streaming chunk loader in Python (`vcfscape-web`) that serves windowed variant slices and sample genotypes with an LRU cache.
-3. **Textual TUI Virtual Windowing**: Dynamic row replacement and viewport-bound buffer in Textual `DataTable`, keeping memory minimal and rendering instantaneous.
-4. **Web UI Virtual Matrix**: Virtualized table rows and columns with horizontal/vertical viewport clipping, prefetching, and coordinate-based region jumping.
+Comprehensive architectural implementation plan to eliminate startup unresponsiveness and achieve instantaneous cursor/pointer movement in both the Textual TUI and Web versions when loading very large multi-gigabyte, multi-sample VCF files.
 
 ---
 
-## 2. Architecture & Data Flow
+## User Review & Critical Decisions
+
+> [!IMPORTANT]
+> The following decisions were confirmed to govern the performance architecture:
+
+- **Confirmed Decision 1 (Startup Variant Counting)**: **Instant startup with asynchronous background counter**. The application will display the first slice of variant rows and mount the UI immediately (< 30ms). Total variant counting for `.vcf.gz` files will execute in a lightweight background thread and seamlessly update the header once complete.
+- **Confirmed Decision 2 (Sample Column Scaling)**: **Dynamic horizontal windowing of visible sample columns in Textual**. Rather than adding hundreds or thousands of sample columns to Textual's in-memory `DataTable` (which explodes to 150,000+ cells and slows down cursor movement), the TUI will dynamically window sample columns to the visible viewport width (20–30 columns).
+- **Confirmed Decision 3 (Web Large File Safeguard)**: **Preview first 1,000 variants with server recommendation for big files**. Direct browser file uploads will stream the first 1,000 variants without loading gigabytes of raw text into memory, displaying a notification recommending the local Python streaming server (`vcfscape-web`) for full-file exploration.
+
+---
+
+## 1. Overview & Core Concept
+
+### What It Does
+Empowers malaria researchers and genomic surveillance teams to open multi-gigabyte, multi-sample VCF files (`.vcf` and `.vcf.gz`) with **zero initial startup lag (< 30ms)** and **silky-smooth pointer/cursor navigation (60 FPS, < 2ms latency per keystroke)** in both the Textual terminal interface and the Web simulator.
+
+### Target Audience & Persona
+Field epidemiologists, bioinformaticians, and genomic surveillance researchers inspecting large-scale *Plasmodium falciparum* and *P. vivax* datasets with 500 to 2,500 clinical isolates and hundreds of thousands of genetic markers.
+
+### Key Value Delivered
+- **Zero Startup Wait**: The UI is usable instantly upon launching `vcfscape` or `vcfscape-web`, eliminating 30–120 second freezes on cold start.
+- **Fluid Keyboard Navigation**: Arrow keys respond instantly without dropped frames or input lag.
+- **Zero Window Edge Stutter**: Scrolling across row buffer boundaries remains smooth without full-table DOM or `DataTable` rebuilds.
+- **Memory Safety**: Prevents browser tab crashes and terminal memory exhaustion.
+
+---
+
+## 2. User Experience & Visual Design
+
+### TUI Experience (Textual)
+1. **Immediate Zero-State Launch**: Terminal window opens within 30 milliseconds. Fixed variant metadata columns (CHROM, POS, REF, ALT, QUAL, FILTER, GENE) and the initial viewport of sample genotype cells appear populated.
+2. **Asynchronous Header Indicator**: 
+   - While counting in the background, the header displays `Variants: Counting...` with total samples and active backend.
+   - Upon completion, the header updates to the exact count (e.g. `Variants: 142,500 | Samples: 850`) without interrupting user navigation.
+3. **Responsive Pointer Movement**:
+   - Arrow keys (`Up`/`Down`/`Left`/`Right`) highlight cells immediately without lag.
+   - When cursor reaches the horizontal boundary of visible samples, sample columns slide smoothly with dynamic header labels.
+   - Sidebar panels (`VariantSummary`, `CohortListWidget`, `CellInspector`) update in real time without queuing up stale renders.
+
+### Web Experience
+1. **Streaming Load**: When connected to `vcfscape-web`, metadata and initial variant slices load concurrently.
+2. **Client-Side File Upload Modal**:
+   - Dragging a 500 MB+ VCF directly into the browser streams the first 1,000 variants in chunks using `ReadableStream`.
+   - A quiet banner at the top of the table informs the user:
+     `Displaying first 1,000 variants. For full multi-gigabyte dataset streaming, run vcfscape-web <file.vcf>.`
+3. **Horizontal Virtualization**: Only visible sample columns within the scroll container are rendered in the DOM, eliminating layout recalculation overhead on 1,000+ sample datasets.
+
+---
+
+## 3. Key Product Decisions & Trade-Offs
+
+### Decision 1: Asynchronous Background Counting vs. Blocking Exact Count
+- **Chosen Approach**: Start immediately with an indeterminate count indicator (`Variants: Counting...`), run line counting in a background daemon thread, and dispatch a thread-safe update event to the UI upon completion.
+- **Why**: Counting millions of compressed lines in Python gzip takes 30–120 seconds. Blocking startup for a decorative total count destroys user experience.
+- **Alternatives Considered**: 
+  - *Estimating based on file size*: Highly inaccurate for VCF files due to variable INFO field lengths and sample counts.
+  - *No count at all*: Users need to know total variant volume for surveillance context.
+
+### Decision 2: Horizontal Column Windowing in Textual DataTable
+- **Chosen Approach**: Dynamically mount only the horizontal slice of sample columns that fit the terminal viewport (plus 5 overscan columns on either side) into Textual's `DataTable`. As the cursor moves left/right, shift the active sample window.
+- **Why**: Textual's `DataTable` recalculates layout coordinates across all columns on every cursor move. Reducing columns from 1,000 to ~25 cuts cell widgets from 150,000 to ~3,000, reducing cursor latency from ~60ms down to < 2ms.
+- **Alternatives Considered**: 
+  - *Full pagination*: Forces users to manually press `Page Left` / `Page Right`, breaking natural arrow-key navigation.
+
+### Decision 3: Fast Sparse Indexing with Resilient Cache Fallback
+- **Chosen Approach**: 
+  1. Optimize `SparseVcfIndex._build_index` to read 4 MB binary chunks and track newline offsets in memory instead of calling `f.tell()` per line.
+  2. If writing to `.{basename}.vcfscape.idx` in the file's parent folder fails (e.g., read-only shared cluster folders), automatically fall back to saving in `~/.cache/vcfscape/<hash>.idx`.
+- **Why**: Speeds up index building by > 2× and guarantees that shared/read-only VCFs are cached after the first run.
+
+---
+
+## 4. Technical Architecture & Data Strategy
 
 ```
-                      ┌──────────────────────────────────────────────┐
-                      │              VCF Data Source                 │
-                      │  - Block-Gzipped (.vcf.gz + .tbi / .csi)     │
-                      │  - Uncompressed (.vcf + .vcf.idx / in-mem)   │
-                      └──────────────────────┬───────────────────────┘
-                                             │
-                                             ▼
-                      ┌──────────────────────────────────────────────┐
-                      │           IndexedVcfEngine (Python)          │
-                      │  - Fast header-only parse on launch          │
-                      │  - Genomic region slicing (chr:start-end)     │
-                      │  - Numeric offset windowing (start, limit)   │
-                      │  - Sparse byte-offset index builder          │
-                      │  - Record LRU cache (1,000-5,000 records)    │
-                      └──────────────┬───────────────────────────────┘
-                                     │
-           ┌─────────────────────────┴────────────────────────┐
-           ▼                                                  ▼
-┌─────────────────────────────┐                    ┌────────────────────────────┐
-│      Textual TUI Core       │                    │    vcfscape-web Server     │
-│ - Virtual Row Window Buffer │                    │ - REST / Streaming API:    │
-│ - Over-the-wire paging on   │                    │   /api/meta                │
-│   scroll event boundaries   │                    │   /api/variants (paged)    │
-│ - Region jump modal         │                    │   /api/genotypes (chunked) │
-└─────────────────────────────┘                    └──────────────┬─────────────┘
-                                                                  │ HTTP/JSON
-                                                                  ▼
-                                                   ┌────────────────────────────┐
-                                                   │       React Web App        │
-                                                   │ - @tanstack/react-virtual  │
-                                                   │   or custom windowing      │
-                                                   │ - Jump to Gene/Region      │
-                                                   │ - Sample matrix col-virtual│
-                                                   └────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        VCFscape Engine Architecture                    │
+└────────────────────────────────────────────────────────────────────────┘
+                                    │
+           ┌────────────────────────┴────────────────────────┐
+           ▼                                                 ▼
+┌───────────────────────┐                         ┌───────────────────────┐
+│     Textual TUI       │                         │    Web Simulator      │
+└───────────────────────┘                         └───────────────────────┘
+           │                                                 │
+           ▼                                                 ▼
+┌─────────────────────────┐                       ┌─────────────────────────┐
+│ Dynamic Column Window   │                       │ Column Virtualization   │
+│ (25 Visible Samples)    │                       │ (DOM Windowing)         │
+└─────────────────────────┘                       └─────────────────────────┘
+           │                                                 │
+           └────────────────────────┬────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                       Unified VcfReader Core                           │
+│  - Instant Header Extraction (< 15ms)                                  │
+│  - Async Background Counter Thread                                     │
+│  - LRU Record Cache (3,000 variants)                                   │
+└────────────────────────────────────────────────────────────────────────┘
+          │                                                  │
+          ▼                                                  ▼
+┌──────────────────────────────────┐        ┌────────────────────────────┐
+│   Uncompressed VCF (.vcf)        │        │   Compressed VCF (.vcf.gz) │
+│   - Fast 4MB Chunked Indexer     │        │   - Tabix / cyvcf2 Seeking │
+│   - Fallback ~/.cache/vcfscape/  │        │   - Async line counting    │
+└──────────────────────────────────┘        └────────────────────────────┘
 ```
 
----
+### Component & State Mapping
 
-## 3. Detailed Components & Implementation Steps
-
-### Phase 1: Python Core Dual Indexing Engine (`src/vcfscape/core/`)
-
-1. **`VcfIndexManager`**:
-   - **Tabix / CSI (`.vcf.gz`)**:
-     - Check for `.tbi` or `.csi`. If missing, attempt automatic indexing or fallback to streaming.
-     - Leverage `cyvcf2.VCF(path)` which natively supports tabix querying `vcf(f"{chrom}:{start}-{end}")`.
-     - Read header metadata (samples, contigs/chromosomes, filters, info/format fields) in < 15ms without parsing records.
-   - **Uncompressed VCF (`.vcf`) Sparse Byte-Offset Index**:
-     - Build or load a companion `.vcfscape.idx` binary file containing:
-       - Header end byte offset.
-       - Sparse index array: every $N$-th variant (e.g., every 500 variants), store `(variant_index, chrom, pos, byte_offset)`.
-       - On a 1GB uncompressed VCF, indexing takes ~0.5s in Python or can be generated in background on first load while displaying the first 200 records immediately.
-       - Binary search in the sparse index to seek (`file.seek(offset)`) and yield exact slices of variants on demand.
-2. **`IndexedVcfReader`**:
-   - Refactor `VcfReader` to distinguish between `metadata` (instant) and `records` (lazy).
-   - Implement `get_total_count() -> int` (estimated from index or known exact count).
-   - Implement `get_slice(offset: int, limit: int) -> List[VariantRecord]`.
-   - Implement `query_region(chrom: str, start: int, end: int, limit: int = 500) -> List[VariantRecord]`.
-   - Cache decoded records in an internal `collections.OrderedDict` LRU cache (e.g., 2,000 records max).
+| Component | File / Area | Key Enhancements |
+| :--- | :--- | :--- |
+| `VcfReader` | `src/vcfscape/core/vcf_reader.py` | Asynchronous background counting with callback; fast Tabix seek slice support; lazy streaming in `filter_records`. |
+| `SparseVcfIndex` | `src/vcfscape/core/indexer.py` | 4 MB chunk-based byte-offset builder (eliminating per-line `f.tell()`); fallback caching to `~/.cache/vcfscape/`. |
+| `VariantSplitView` | `src/vcfscape/ui/widgets/variant_table.py` | Horizontal column windowing (viewport + overscan); in-place row updates in `shift_buffer`; throttled sidebar selection notifications. |
+| `VcfscapeApp` | `src/vcfscape/ui/app.py` | Initial load uses fast slice without waiting for variant count; receives thread-safe total variant count message and updates `HeaderBar`. |
+| `web_server.py` | `src/vcfscape/web_server.py` | Non-blocking server startup; background metadata hydration; chunked API responses. |
+| `vcfParser.ts` | `src/utils/vcfParser.ts` | Incremental stream reader parsing first 1,000 variants for browser file picker; payload size warning. |
+| `VariantTable.tsx` | `src/components/VariantTable.tsx` | Horizontal sample column DOM virtualization; smooth horizontal scroll synchronization. |
 
 ---
 
-### Phase 2: Web Server Streaming API (`src/vcfscape/web_server.py`)
+## 5. Verification & Testing Strategy
 
-1. **API Endpoints**:
-   - `GET /api/metadata`:
-     - Returns dataset summary: filename, file format (tabix/uncompressed), sample list, sample count, contigs/chromosomes with lengths, total variant count (or estimate).
-   - `GET /api/variants?offset=0&limit=100`:
-     - Returns variant rows for the requested window: chrom, pos, id, ref, alt, qual, filter, info summary, and total count.
-   - `GET /api/region?chrom=Pf3D7_07_v3&start=400000&end=450000&limit=200`:
-     - Returns variants within genomic bounds for coordinate jumping.
-   - `GET /api/matrix?offset=0&limit=100&sample_start=0&sample_limit=50`:
-     - Returns the 2D genotype / sample matrix for the visible variant window and visible sample subset, preventing heavy payload transfer when dealing with 1,000+ isolates.
-2. **Compression & Serialization**:
-   - Enable `gzip` / `deflate` transfer encoding in Python server responses.
-   - Compact JSON format for genotypes (integer-encoded or minimal tuple representation: `[GT, AD, DP, GQ]`).
-
----
-
-### Phase 3: Textual TUI Virtual Windowing (`src/vcfscape/ui/`)
-
-1. **`VirtualVariantTable` & `VirtualSampleMatrix`**:
-   - Replace eager `table.add_row` of all rows with a **sliding window buffer**:
-     - Maintain a buffer of visible rows plus a padding buffer (e.g. 150 rows above and below current scroll position).
-     - As the cursor moves up/down or page-up/page-down triggers, if the cursor approaches buffer thresholds (< 30 rows from margin), asynchronously fetch the next slice from `IndexedVcfReader` and update rows.
-     - Keep total live rows in `DataTable` bounded to ~300 rows to ensure snappy UI rendering without widget hierarchy lag.
-2. **Genomic Coordinate & Chromosome Jump Dialog**:
-   - Pressing `Ctrl+G` or `:` opens a quick-jump dialog:
-     - Select Chromosome / Contig.
-     - Enter genomic coordinate (e.g., `Pf3D7_07_v3:403000`).
-     - Seek immediately via tabix index or sparse index, repopulating viewport in under 50ms.
-
----
-
-### Phase 4: Web UI Virtualization & Smooth Scrolling (`src/components/`)
-
-1. **Virtual Grid Matrix**:
-   - Integrate virtualization for the variant table rows and horizontal sample matrix columns.
-   - Keep fixed left columns (Variant ID, Position, Ref/Alt) pinned while horizontally scrolling the sample matrix.
-2. **Chunk Prefetching**:
-   - Maintain a sliding window cache in React (`useVcfChunkLoader` hook).
-   - Automatically prefetch adjacent chunk `[offset - limit, offset + 2 * limit]` in background while rendering current viewport.
-3. **Region / Gene Selector**:
-   - Coordinate navigation bar with quick selector for Plasmodium falciparum / standard chromosomes.
-   - Direct jump to gene loci (e.g., *crt*, *k13*, *dhfr*, *mdr1*) with instant coordinate-based window reload.
-
----
-
-## 4. Verification & Testing Strategy
-
-1. **Unit & Benchmark Tests (`tests/test_vcf_indexing.py`)**:
-   - Verify `IndexedVcfReader` on indexed `.vcf.gz` (tabix lookup by coordinate).
-   - Verify sparse index generator on large uncompressed `.vcf` (seeking by offset).
-   - Benchmark: Ensure startup time on 50MB-1GB VCF is < 200ms.
-   - Benchmark: Ensure slice query of 100 rows completes in < 15ms.
-2. **TUI Tests**:
-   - Verify scrolling past window boundary triggers transparent chunk reload without breaking selected cell or cursor position.
-   - Test horizontal scrolling and half-screen jumps across hundreds of sample columns.
-3. **Web API Tests**:
-   - Validate `/api/metadata`, `/api/variants`, and `/api/matrix` response times and payload sizes.
-   - Verify end-to-end client rendering with 10,000+ variants.
+1. **Python Unit Tests**:
+   - Test `VcfReader` asynchronous total variants counting without blocking init.
+   - Test `SparseVcfIndex` fast chunked indexing and cache path fallback.
+   - Test `VariantSplitView` column windowing and cursor navigation.
+   - Execute full test suite via `python3 -m unittest discover tests`.
+2. **Synthetic Large-Dataset Benchmarks**:
+   - Verify uncompressed 100,000-variant file startup time < 50ms.
+   - Verify block-gzipped 100,000-variant file startup time < 50ms.
+   - Verify single arrow key latency < 5ms with 1,000 samples.
+3. **Web Simulator Verification**:
+   - Run `compile_applet` and `lint_applet` to guarantee clean TypeScript typing and build.
+   - Verify 1,000-sample horizontal scroll fluidity in browser preview.

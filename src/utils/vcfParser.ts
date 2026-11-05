@@ -12,6 +12,7 @@ export interface ParsedVcfResult {
   samples: string[];
   cohorts: Cohort[];
   variants: Variant[];
+  isTruncated?: boolean;
 }
 
 const KNOWN_DRUG_MARKERS: Record<string, { gene: string; mutation: string; drug: string; status: string; details: string }> = {
@@ -145,20 +146,150 @@ export function parseVcfText(content: string, filename: string): ParsedVcfResult
   };
 }
 
-export async function readVcfFile(file: File): Promise<ParsedVcfResult> {
-  let text = "";
+export async function readVcfFile(file: File, maxVariants: number = 1000): Promise<ParsedVcfResult> {
+  let stream: ReadableStream<Uint8Array> = file.stream();
   if (file.name.endsWith(".gz")) {
     if (typeof DecompressionStream !== "undefined") {
       const ds = new DecompressionStream("gzip");
-      const decompressedStream = file.stream().pipeThrough(ds);
-      const resp = new Response(decompressedStream);
-      text = await resp.text();
+      stream = stream.pipeThrough(ds as unknown as TransformStream<Uint8Array, Uint8Array>);
     } else {
       throw new Error("Gzip decompression not supported in this browser environment.");
     }
-  } else {
-    text = await file.text();
   }
 
-  return parseVcfText(text, file.name);
+  const reader = stream.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let samples: string[] = [];
+  const variants: Variant[] = [];
+  let isTruncated = false;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        if (line.startsWith("#CHROM")) {
+          const parts = line.split("\t");
+          samples = parts.slice(9).map((s) => s.trim());
+          continue;
+        }
+
+        if (line.startsWith("#")) continue;
+
+        const cols = line.split("\t");
+        if (cols.length < 8) continue;
+
+        const chrom = cols[0];
+        const pos = parseInt(cols[1], 10);
+        const varId = cols[2] !== "." ? cols[2] : ".";
+        const ref = cols[3];
+        const alt = cols[4].split(",").map((a) => a.trim());
+        const qual = cols[5] !== "." ? parseFloat(cols[5]) : 0;
+        const filter = cols[6];
+        const infoRaw = cols[7];
+        const formatKeys = cols.length > 8 ? cols[8].split(":") : ["GT"];
+
+        const info: Record<string, string> = {};
+        if (infoRaw !== ".") {
+          infoRaw.split(";").forEach((part) => {
+            const [k, v] = part.split("=");
+            if (k) info[k] = v || "true";
+          });
+        }
+
+        const isMulti = alt.length > 1;
+        const isIndel = ref.length !== 1 || alt.some((a) => a.length !== 1);
+        let varType: Variant["varType"] = "SNP";
+        if (isMulti && isIndel) varType = "Multi-Allelic INDEL";
+        else if (isMulti) varType = "Multi-Allelic SNP";
+        else if (isIndel) varType = "INDEL";
+
+        const locusKey = `${chrom}:${pos}`;
+        const marker = KNOWN_DRUG_MARKERS[locusKey];
+        const gene = info.GENE || (marker ? marker.gene : ".");
+        const impact = info.IMPACT || (marker ? "Missense / Resistance" : "Intergenic");
+        const mutation = info.MUT || (marker ? marker.mutation : `${ref}${pos}${alt.join("/")}`);
+        const drug = info.DRUG || (marker ? marker.drug : undefined);
+        const drugStatus = marker ? marker.status : undefined;
+        const drugDetails = marker ? marker.details : undefined;
+
+        const sampleCells: Variant["samples"] = {};
+        samples.forEach((sampleName, sIdx) => {
+          const colVal = cols[9 + sIdx] || "./.";
+          const subVals = colVal.split(":");
+          const sMap: Record<string, string> = {};
+          formatKeys.forEach((fk, fkIdx) => {
+            sMap[fk] = subVals[fkIdx] || ".";
+          });
+          const gt = sMap.GT || "./.";
+          const dp = parseInt(sMap.DP || "0", 10) || 0;
+          const ad = sMap.AD || ".";
+          const gq = parseInt(sMap.GQ || "0", 10) || 0;
+          const pl = sMap.PL || undefined;
+          sampleCells[sampleName] = { GT: gt, DP: dp, AD: ad, GQ: gq, PL: pl };
+        });
+
+        variants.push({
+          id: `var_${variants.length}_${chrom}_${pos}`,
+          chrom,
+          pos,
+          varId,
+          ref,
+          alt,
+          qual: isNaN(qual) ? 0 : qual,
+          filter: filter || "PASS",
+          gene,
+          impact,
+          mutation,
+          drug,
+          drugStatus,
+          drugDetails,
+          varType,
+          info,
+          formatKeys,
+          samples: sampleCells,
+        });
+
+        if (variants.length >= maxVariants) {
+          isTruncated = true;
+          break;
+        }
+      }
+
+      if (isTruncated) {
+        await reader.cancel();
+        break;
+      }
+    }
+  } catch (err) {
+    if (!isTruncated) throw err;
+  }
+
+  const cohorts: Cohort[] = [
+    {
+      name: "All Samples",
+      sampleIds: [...samples],
+      description: `All ${samples.length} isolates in VCF`,
+      active: true,
+      color: "#10b981",
+    },
+  ];
+
+  return {
+    filename: file.name,
+    totalVariants: variants.length,
+    totalSamples: samples.length,
+    samples,
+    cohorts,
+    variants,
+    isTruncated,
+  };
 }

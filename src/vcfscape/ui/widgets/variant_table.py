@@ -275,11 +275,23 @@ class VariantSplitView(Widget):
         self.current_sample_idx = 0
         self._last_notified: Optional[Tuple[int, int]] = None
 
+        # Horizontal sample windowing for high sample counts (e.g. 500-2,500 samples)
+        self.sample_window_size = 25
+        self.sample_window_start = 0
+
         # Virtual windowing buffer state
         self.window_size = 150
         self.buffer_start = 0
-        self.total_records_count = self.reader.total_variants if self.reader else len(records)
+        self.total_records_count = (
+            self.reader.get_total_variants_async()
+            if (self.reader and hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None)
+            else (self.reader.total_variants if (self.reader and hasattr(self.reader, "total_variants_ready") and self.reader.total_variants_ready) else len(records))
+        )
         self._is_shifting = False
+
+    def update_total_variants(self, count: int) -> None:
+        """Update total variant count when background counter completes."""
+        self.total_records_count = count
 
         # 1. Left Fixed Table
         self.fixed_table = FixedVariantTable(id="fixed_table", cursor_type="row", zebra_stripes=True)
@@ -415,20 +427,53 @@ class VariantSplitView(Widget):
 
             self.fixed_table.add_row(*row_cells, key=f"frow_{r_idx}")
 
-    def rebuild_sample_table(self):
-        """Constructs right horizontally scrollable sample columns."""
-        self.sample_table.clear(columns=True)
+    def get_visible_samples(self) -> List[str]:
+        if len(self.samples) <= self.sample_window_size:
+            return self.samples
+        return self.samples[self.sample_window_start : self.sample_window_start + self.sample_window_size]
 
-        for s in self.samples:
+    def rebuild_sample_table(self):
+        """Constructs right horizontally scrollable sample columns using dynamic windowing."""
+        self.sample_table.clear(columns=True)
+        visible_samples = self.get_visible_samples()
+
+        for s in visible_samples:
             self.sample_table.add_column(Text(s, style="bold bright_white"), key=f"s_{s}")
 
         for r_idx, r in enumerate(self.records):
             row_cells = []
-            for s in self.samples:
+            for s in visible_samples:
                 s_dict = r.sample_data.get(s, {})
                 cell_val = str(s_dict.get(self.format_tag, "."))
                 row_cells.append(self._style_sample_cell(cell_val, self.format_tag))
             self.sample_table.add_row(*row_cells, key=f"srow_{r_idx}")
+
+    def _check_sample_window_boundary(self, local_col: int) -> None:
+        """Dynamically shifts horizontal sample column window when cursor reaches window edge."""
+        if len(self.samples) <= self.sample_window_size:
+            return
+
+        step = 8
+        if local_col >= self.sample_window_size - 2 and (self.sample_window_start + self.sample_window_size) < len(self.samples):
+            new_start = min(len(self.samples) - self.sample_window_size, self.sample_window_start + step)
+            if new_start != self.sample_window_start:
+                new_local_col = max(0, self.current_sample_idx - new_start)
+                self.sample_window_start = new_start
+                self.rebuild_sample_table()
+                try:
+                    self.sample_table.move_cursor(row=self.current_row_idx, column=new_local_col, animate=False)
+                except Exception:
+                    pass
+        elif local_col <= 2 and self.sample_window_start > 0:
+            new_start = max(0, self.sample_window_start - step)
+            if new_start != self.sample_window_start:
+                new_local_col = min(self.sample_window_size - 1, self.current_sample_idx - new_start)
+                self.sample_window_start = new_start
+                self.rebuild_sample_table()
+                try:
+                    self.sample_table.move_cursor(row=self.current_row_idx, column=new_local_col, animate=False)
+                except Exception:
+                    pass
 
     def _style_sample_cell(self, val: str, tag: str) -> Text:
         """Styling for sample genotype/depth cells."""
@@ -484,15 +529,20 @@ class VariantSplitView(Widget):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
         if event.data_table.id == "fixed_table":
             target_row = event.cursor_row
+            local_col = (
+                self.current_sample_idx
+                if len(self.samples) <= self.sample_window_size
+                else max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start))
+            )
             # Only drive peer if sample_table is not already at target_row and fixed_table is active
             if self.sample_table.cursor_row != target_row:
                 if self.fixed_table.has_focus or not self.sample_table.has_focus:
                     self._syncing_cursor = True
                     try:
                         try:
-                            self.sample_table.move_cursor(row=target_row, animate=False)
+                            self.sample_table.move_cursor(row=target_row, column=local_col, animate=False)
                         except TypeError:
-                            self.sample_table.move_cursor(row=target_row)
+                            self.sample_table.move_cursor(row=target_row, column=local_col)
                     finally:
                         self._syncing_cursor = False
 
@@ -504,7 +554,13 @@ class VariantSplitView(Widget):
     def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted):
         if event.data_table.id == "sample_table":
             target_row = event.coordinate.row
-            target_col = event.coordinate.column
+            target_local_col = event.coordinate.column
+
+            if len(self.samples) <= self.sample_window_size:
+                global_col = target_local_col
+            else:
+                global_col = self.sample_window_start + target_local_col
+
             # Only drive peer if fixed_table is not already at target_row and sample_table is active
             if self.fixed_table.cursor_row != target_row:
                 if self.sample_table.has_focus or not self.fixed_table.has_focus:
@@ -517,12 +573,13 @@ class VariantSplitView(Widget):
                     finally:
                         self._syncing_cursor = False
 
-            if self.current_row_idx != target_row or self.current_sample_idx != target_col:
+            if self.current_row_idx != target_row or self.current_sample_idx != global_col:
                 self.current_row_idx = target_row
-                self.current_sample_idx = target_col
-                self.sample_table.scroll_column_half_screen(target_col)
+                self.current_sample_idx = global_col
+                self.sample_table.scroll_column_half_screen(target_local_col)
                 self._notify_selection(self.current_row_idx, self.current_sample_idx)
                 self._check_buffer_boundary(target_row)
+                self._check_sample_window_boundary(target_local_col)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int):
         if 0 <= row_idx < len(self.records):

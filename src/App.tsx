@@ -72,7 +72,8 @@ export default function App() {
             setFilename(meta.filename);
             if (Array.isArray(meta.samples)) setSamples(meta.samples);
             if (Array.isArray(meta.cohorts) && meta.cohorts.length > 0) setCohorts(meta.cohorts);
-            setTotalVariantsCount(meta.totalVariants || 0);
+            const totalCount = typeof meta.totalVariants === "number" ? meta.totalVariants : 0;
+            setTotalVariantsCount(totalCount);
 
             // Fetch initial slice of variants (sub-15ms)
             const varQuery = token ? `&token=${encodeURIComponent(token)}` : "";
@@ -84,8 +85,11 @@ export default function App() {
                 setVariants(varData.variants);
                 setSelectedVariantIndex(0);
                 setSelectedSampleIndex(0);
+                const countLabel = typeof meta.totalVariants === "number"
+                  ? `${meta.totalVariants.toLocaleString()} variants`
+                  : "Streaming variants";
                 setLogMessage(
-                  `Ready: ${meta.totalVariants.toLocaleString()} variants across ${meta.totalSamples} isolates from ${meta.filename} (${meta.backend}).`
+                  `Ready: ${countLabel} across ${meta.totalSamples} isolates from ${meta.filename} (${meta.backend}).`
                 );
                 return;
               }
@@ -146,9 +150,16 @@ export default function App() {
       setFilename(res.filename);
       setSelectedVariantIndex(0);
       setSelectedSampleIndex(0);
-      setLogMessage(
-        `Successfully loaded ${res.totalVariants} variants and ${res.totalSamples} isolates from ${res.filename}.`
-      );
+      setTotalVariantsCount(res.totalVariants);
+      if (res.isTruncated) {
+        setLogMessage(
+          `Displaying first ${res.totalVariants.toLocaleString()} variants across ${res.totalSamples} isolates from ${res.filename}. (Tip: Run 'vcfscape-web ${res.filename}' for full multi-gigabyte dataset streaming)`
+        );
+      } else {
+        setLogMessage(
+          `Successfully loaded ${res.totalVariants} variants and ${res.totalSamples} isolates from ${res.filename}.`
+        );
+      }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       setLogMessage(`Error loading VCF file: ${errMsg}`);

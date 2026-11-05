@@ -3,6 +3,7 @@ HeaderBar Widget for VCFscape - VCF inspector part of vivaxGEN Project.
 Compact, single-line borderless header displaying essential metadata.
 """
 
+from typing import Optional
 from textual.widget import Widget
 from textual.reactive import reactive
 from rich.text import Text
@@ -11,7 +12,7 @@ class HeaderBar(Widget):
     """Header bar rendering filename, genome, counts, view mode, and format tag."""
 
     filename = reactive("")
-    total_variants = reactive(0)
+    total_variants = reactive(None)
     total_samples = reactive(0)
     view_mode = reactive("Normal")
     format_tag = reactive("GT")
@@ -21,7 +22,7 @@ class HeaderBar(Widget):
     def __init__(
         self,
         filename: str = "",
-        total_variants: int = 0,
+        total_variants: Optional[int] = None,
         total_samples: int = 0,
         **kwargs
     ):
@@ -40,7 +41,12 @@ class HeaderBar(Widget):
         text.append("Pf3D7_v3", style="bold yellow")
         text.append(" │ ", style="bright_black")
         text.append("Vars: ", style="dim")
-        text.append(f"{self.total_variants:,}", style="bold green")
+        if isinstance(self.total_variants, int) and self.total_variants > 0:
+            text.append(f"{self.total_variants:,}", style="bold green")
+        elif self.total_variants == 0:
+            text.append("0", style="bold green")
+        else:
+            text.append("Counting...", style="italic bright_cyan")
         text.append(" │ ", style="bright_black")
         text.append("Samples: ", style="dim")
         text.append(f"{self.total_samples:,}", style="bold green")

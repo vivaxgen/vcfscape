@@ -7,7 +7,8 @@ Supports instant startup (< 50ms), lazy chunked fetching, LRU caching, and regio
 
 import os
 import gzip
-from typing import List, Dict, Any, Optional, Tuple, Iterator
+import threading
+from typing import List, Dict, Any, Optional, Tuple, Iterator, Callable
 
 from vcfscape.core.malaria_db import MalariaAnnotationDB, MarkerAnnotation
 from vcfscape.core.indexer import SparseVcfIndex, RecordLruCache
@@ -209,6 +210,8 @@ class VcfReader:
         self._cache = RecordLruCache(maxsize=3000)
         self._records: List[VariantRecord] = []
         self._total_variants_count: Optional[int] = None
+        self._counting_thread: Optional[threading.Thread] = None
+        self._count_callbacks: List[Callable[[int], None]] = []
 
         # 1. Fast Header Extraction (always executes in < 15ms)
         self._load_header_only()
@@ -254,17 +257,61 @@ class VcfReader:
                     break
 
     def _setup_gzipped_source(self):
-        """Prepares cyvcf2 or counts records for gzipped files."""
+        """Prepares cyvcf2 and starts asynchronous background line counting."""
         has_tabix = os.path.exists(f"{self.filepath}.tbi") or os.path.exists(f"{self.filepath}.csi")
         if HAS_CYVCF2:
             try:
-                vcf = cyvcf2.VCF(self.filepath)
+                cyvcf2.VCF(self.filepath)
                 self.backend = "cyvcf2_tabix" if has_tabix else "cyvcf2"
-                return
+            except Exception:
+                self.backend = "gzipped_stream"
+        else:
+            self.backend = "gzipped_stream"
+
+        # Background thread counts records without blocking UI startup
+        self._start_background_count()
+
+    def _start_background_count(self):
+        if self._counting_thread is not None or self._total_variants_count is not None:
+            return
+
+        def _count_worker():
+            try:
+                count = 0
+                with self._open_file() as f:
+                    for line in f:
+                        if line and not line.startswith("#"):
+                            count += 1
+                self._total_variants_count = count
+                for cb in list(self._count_callbacks):
+                    try:
+                        cb(count)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
-        self.backend = "gzipped_stream"
+        self._counting_thread = threading.Thread(target=_count_worker, daemon=True)
+        self._counting_thread.start()
+
+    def add_total_variants_callback(self, cb: Callable[[int], None]):
+        """Register a callback for when variant counting completes asynchronously."""
+        if self._total_variants_count is not None:
+            try:
+                cb(self._total_variants_count)
+            except Exception:
+                pass
+        else:
+            self._count_callbacks.append(cb)
+
+    @property
+    def total_variants_ready(self) -> bool:
+        """Returns True if the exact total variant count is known."""
+        return self._total_variants_count is not None
+
+    def get_total_variants_async(self) -> Optional[int]:
+        """Returns total variant count if already known, or None if still counting in background."""
+        return self._total_variants_count
 
     def _preload_all_records(self):
         """Loads records into memory for smaller files or backward compatibility."""
@@ -281,6 +328,12 @@ class VcfReader:
         if self._sparse_index:
             self._total_variants_count = self._sparse_index.total_records
             return self._total_variants_count
+
+        # If background counting is running, wait for it synchronously for callers that need it
+        if self._counting_thread and self._counting_thread.is_alive():
+            self._counting_thread.join()
+            if self._total_variants_count is not None:
+                return self._total_variants_count
 
         # Fallback count for gzipped files without tabix total
         count = 0
@@ -504,29 +557,27 @@ class VcfReader:
         search_query: Optional[str] = None,
         limit: int = 200,
     ) -> List[VariantRecord]:
-        """Filter variants in real time, respecting limit for fast responsive UI."""
-        source_records = self._records if self._records else self.get_records(0, None)
-        filtered = []
-        for r in source_records:
+        """Filter variants in real time using streaming evaluation, respecting limit for fast responsive UI."""
+        def _match_record(r: VariantRecord) -> bool:
             if min_qual is not None and r.qual is not None and r.qual < min_qual:
-                continue
+                return False
             if min_depth is not None:
                 total_dp = sum(r.depths.values())
                 mean_dp = total_dp / len(r.depths) if r.depths else 0
                 if mean_dp < min_depth:
-                    continue
+                    return False
             if variant_type and variant_type != "ALL":
                 if variant_type == "SNP" and r.is_indel:
-                    continue
+                    return False
                 if variant_type == "INDEL" and not r.is_indel:
-                    continue
+                    return False
                 if variant_type == "MULTI_ALLELIC" and not r.is_multiallelic:
-                    continue
+                    return False
                 if variant_type == "DRUG_RESISTANT" and not r.drug_annotation:
-                    continue
+                    return False
             if filter_status and filter_status != "ALL":
                 if r.filter != filter_status:
-                    continue
+                    return False
             if search_query:
                 q = search_query.lower()
                 matches = (
@@ -537,8 +588,26 @@ class VcfReader:
                     q in r.mutation.lower()
                 )
                 if not matches:
+                    return False
+            return True
+
+        filtered: List[VariantRecord] = []
+        if self._records:
+            for r in self._records:
+                if _match_record(r):
+                    filtered.append(r)
+                    if limit and len(filtered) >= limit:
+                        break
+            return filtered
+
+        # Stream lazily through file without loading entire dataset into memory
+        with self._open_file() as f:
+            for line in f:
+                if not line or line.startswith("#"):
                     continue
-            filtered.append(r)
-            if limit and len(filtered) >= limit:
-                break
+                rec = parse_vcf_line(line, self.samples)
+                if rec and _match_record(rec):
+                    filtered.append(rec)
+                    if limit and len(filtered) >= limit:
+                        break
         return filtered
