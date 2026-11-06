@@ -112,16 +112,15 @@ class MalariaAnnotationDB:
     def lookup(cls, chrom: str, pos: int, ref: str = "", alt: str = "") -> Optional[MarkerAnnotation]:
         """
         Check if variant corresponds to a known drug resistance locus.
-        Normalizes chrom naming (e.g., Pf3D7_13_v3 vs chr13).
+        Performs direct lookup using exact chromosome name as-is for maximum speed.
         """
-        clean_chrom = cls.normalize_chrom(chrom)
-        key = (clean_chrom, pos)
+        key = (chrom, pos)
         if key in cls.KNOWN_MARKERS:
             return cls.KNOWN_MARKERS[key]
         
         # Check if inside region
         for r_chrom, start, end, gene, locus_id, drug in cls.GENE_REGIONS:
-            if r_chrom == clean_chrom and start <= pos <= end:
+            if r_chrom == chrom and start <= pos <= end:
                 return MarkerAnnotation(
                     gene=gene, locus_id=locus_id, mutation=f"{ref}>{alt}",
                     drug=drug, status="Regional Locus",
@@ -131,12 +130,6 @@ class MalariaAnnotationDB:
 
     @classmethod
     def normalize_chrom(cls, chrom: str) -> str:
-        """Harmonizes chromosome representations (Pf3D7_07_v3, 7, chr7, Pf3D7_07)."""
-        chrom_str = str(chrom).strip()
-        if chrom_str.startswith("Pf3D7_"):
-            return chrom_str
-        digits = "".join([c for c in chrom_str if c.isdigit()])
-        if digits:
-            num = int(digits)
-            return f"Pf3D7_{num:02d}_v3"
-        return chrom_str
+        """Returns chromosome name as-is without mutation or overhead."""
+        return chrom
+

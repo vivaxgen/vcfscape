@@ -40,8 +40,9 @@ class TestMalariaAnnotationDB(unittest.TestCase):
         self.assertEqual(marker.drug, "Sulfadoxine")
 
     def test_chrom_normalization(self):
-        self.assertEqual(MalariaAnnotationDB.normalize_chrom("13"), "Pf3D7_13_v3")
-        self.assertEqual(MalariaAnnotationDB.normalize_chrom("chr7"), "Pf3D7_07_v3")
+        # Chromosome names are left as-is without modification for faster lookup
+        self.assertEqual(MalariaAnnotationDB.normalize_chrom("13"), "13")
+        self.assertEqual(MalariaAnnotationDB.normalize_chrom("chr7"), "chr7")
         self.assertEqual(MalariaAnnotationDB.normalize_chrom("Pf3D7_05_v3"), "Pf3D7_05_v3")
 
     def test_unknown_region_fallback(self):
