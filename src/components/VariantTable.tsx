@@ -339,8 +339,6 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                 ? "bg-[#f8fafc]"
                 : "bg-[#111827]";
 
-              const chromShort = v.chrom.replace("Pf3D7_", "").replace("_v3", "");
-
               return (
                 <tr
                   key={v.id || `var_${vIdx}`}
@@ -351,7 +349,7 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                 >
                   {viewMode === "raw" ? (
                     <>
-                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[80px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[120px] font-mono ${isLight ? "text-slate-700" : "text-slate-300"}`}>
                         {v.chrom}
                       </td>
                       <td className={`px-2 py-1 whitespace-nowrap font-medium ${isLight ? "text-slate-900" : "text-white"}`}>
@@ -383,8 +381,8 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                     </>
                   ) : viewMode === "compact" ? (
                     <>
-                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[80px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                        {chromShort}
+                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[120px] font-mono ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                        {v.chrom}
                       </td>
                       <td className={`px-2 py-1 whitespace-nowrap font-medium ${isLight ? "text-slate-900" : "text-white"}`}>
                         {v.pos.toLocaleString()}
@@ -398,8 +396,8 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                     </>
                   ) : viewMode === "essential" ? (
                     <>
-                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[80px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                        {chromShort}
+                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[120px] font-mono ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                        {v.chrom}
                       </td>
                       <td className={`px-2 py-1 whitespace-nowrap font-medium ${isLight ? "text-slate-900" : "text-white"}`}>
                         {v.pos.toLocaleString()}
@@ -408,8 +406,8 @@ export const VariantTable: React.FC<VariantTableProps> = ({
                   ) : (
                     // Normal mode
                     <>
-                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[80px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                        {chromShort}
+                      <td className={`px-2 py-1 whitespace-nowrap truncate max-w-[120px] font-mono ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                        {v.chrom}
                       </td>
                       <td className={`px-2 py-1 whitespace-nowrap font-medium ${isLight ? "text-slate-900" : "text-white"}`}>
                         {v.pos.toLocaleString()}

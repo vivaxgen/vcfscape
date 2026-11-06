@@ -1,6 +1,6 @@
 {
-  "summary": "Comprehensive architectural plan to eliminate startup freezes and make pointer/cursor movement instantaneous across both Textual TUI and Web versions when handling very big VCF files. Incorporates asynchronous background variant counting, chunked sparse indexing with user-cache fallback, dynamic horizontal column windowing in Textual, seamless buffer shifting, and in-browser streaming safeguards.",
-  "updatedAt": "2026-11-05T18:30:07.287253628Z",
+  "summary": "Implementation plan to fix Textual and Web virtual buffer scrolling past 150 variants, eliminate chromosome name mutilation by always displaying full unmodified chromosome names, and ensure seamless cursor tracking and selection synchronization.",
+  "updatedAt": "2026-11-06T11:09:10.546183908Z",
   "requestFeedback": true,
   "userFacing": true
 }

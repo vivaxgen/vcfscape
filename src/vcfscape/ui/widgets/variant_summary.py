@@ -44,10 +44,9 @@ class VariantSummary(Widget):
         text.append(f" [{r.filter}]\n", style=filter_style)
 
         # 2. Locus, ID & Type
-        chrom_short = r.chrom.replace("Pf3D7_", "Pf").replace("_v3", "")
         qual_str = f"{r.qual:.0f}" if r.qual is not None else "."
         text.append("Locus: ", style="dim")
-        text.append(f"{chrom_short}:{r.pos:,} ", style="bold white")
+        text.append(f"{r.chrom}:{r.pos:,} ", style="bold white")
         text.append(f"Q:{qual_str}\n", style="bright_green")
 
         # 3. Gene, Mutation & Impact

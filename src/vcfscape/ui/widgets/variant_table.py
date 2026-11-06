@@ -72,6 +72,49 @@ class FixedVariantTable(DataTable):
         else:
             super().action_cursor_right()
 
+    def action_cursor_down(self) -> None:
+        old_row = self.cursor_row
+        super().action_cursor_down()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            # If cursor reached or exceeded bottom boundary, request parent shift
+            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=True)
+
+    def action_cursor_up(self) -> None:
+        old_row = self.cursor_row
+        super().action_cursor_up()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            # If cursor reached or exceeded top boundary, request parent shift
+            if self.cursor_row <= 0 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=False)
+
+    def action_page_down(self) -> None:
+        old_row = self.cursor_row
+        super().action_page_down()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            if self.cursor_row >= self.row_count - 10 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=True, step=parent.window_size // 2)
+
+    def action_page_up(self) -> None:
+        old_row = self.cursor_row
+        super().action_page_up()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            if self.cursor_row <= 10 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=False, step=parent.window_size // 2)
+
+
 
 class SampleMatrixTable(DataTable):
     """Right horizontally scrollable table displaying sample genotype cells."""
@@ -198,6 +241,47 @@ class SampleMatrixTable(DataTable):
             target_x = min(target_x, col_left)
             self.scroll_to(x=target_x, animate=False, force=True)
 
+    def action_cursor_down(self) -> None:
+        old_row = self.cursor_row
+        super().action_cursor_down()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=True)
+
+    def action_cursor_up(self) -> None:
+        old_row = self.cursor_row
+        super().action_cursor_up()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            if self.cursor_row <= 0 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=False)
+
+    def action_page_down(self) -> None:
+        old_row = self.cursor_row
+        super().action_page_down()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            if self.cursor_row >= self.row_count - 10 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=True, step=parent.window_size // 2)
+
+    def action_page_up(self) -> None:
+        old_row = self.cursor_row
+        super().action_page_up()
+        parent = self.parent
+        while parent is not None and not hasattr(parent, "shift_buffer"):
+            parent = parent.parent
+        if parent is not None:
+            if self.cursor_row <= 10 or self.cursor_row == old_row:
+                parent.request_scroll_shift(forward=False, step=parent.window_size // 2)
+
+
 
 class VariantSplitView(Widget):
     """
@@ -253,10 +337,10 @@ class VariantSplitView(Widget):
     """
 
     FIXED_WIDTHS = {
-        "essential": 16,
-        "compact": 24,
-        "normal": 38,
-        "raw": 62,
+        "essential": 28,
+        "compact": 36,
+        "normal": 56,
+        "raw": 76,
     }
 
     def __init__(
@@ -314,23 +398,66 @@ class VariantSplitView(Widget):
         """Update total variant count when background counter completes."""
         self.total_records_count = count
 
-    def shift_buffer(self, new_start: int, target_cursor_row: Optional[int] = None) -> None:
-        """Shifts the live row buffer window dynamically without lag."""
-        if not self.reader or self._is_shifting or self.total_records_count <= self.window_size:
+    def request_scroll_shift(self, forward: bool = True, step: int = 40) -> None:
+        """Called by child tables when cursor or scroll reaches the buffer boundary."""
+        if not self.reader or self._is_shifting:
             return
 
-        new_start = max(0, min(new_start, self.total_records_count - self.window_size))
+        if forward:
+            # Shift forward
+            if self.total_records_count is not None and (self.buffer_start + len(self.records)) >= self.total_records_count:
+                return
+            new_start = self.buffer_start + step
+            if self.total_records_count is not None:
+                new_start = min(self.total_records_count - self.window_size, new_start)
+            if new_start > self.buffer_start:
+                new_cursor = max(0, self.current_row_idx - (new_start - self.buffer_start))
+                self.shift_buffer(new_start, target_cursor_row=new_cursor)
+        else:
+            # Shift backward
+            if self.buffer_start <= 0:
+                return
+            new_start = max(0, self.buffer_start - step)
+            if new_start < self.buffer_start:
+                new_cursor = min(self.window_size - 1, self.current_row_idx + (self.buffer_start - new_start))
+                self.shift_buffer(new_start, target_cursor_row=new_cursor)
+
+    def shift_buffer(self, new_start: int, target_cursor_row: Optional[int] = None) -> None:
+        """Shifts the live row buffer window dynamically without lag."""
+        if not self.reader or self._is_shifting:
+            return
+
+        if self.total_records_count is not None:
+            if self.total_records_count <= self.window_size:
+                return
+            new_start = max(0, min(new_start, self.total_records_count - self.window_size))
+        else:
+            new_start = max(0, new_start)
+
         if new_start == self.buffer_start:
             return
 
         self._is_shifting = True
         try:
+            new_records = self.reader.get_slice(new_start, self.window_size)
+            if not new_records:
+                return
             self.buffer_start = new_start
-            self.records = self.reader.get_slice(self.buffer_start, self.window_size)
+            self.records = new_records
+            if target_cursor_row is not None:
+                self.current_row_idx = max(0, min(target_cursor_row, len(self.records) - 1))
             self.rebuild_tables()
             if target_cursor_row is not None and 0 <= target_cursor_row < len(self.records):
-                self.fixed_table.move_cursor(row=target_cursor_row, animate=False)
-                self.sample_table.move_cursor(row=target_cursor_row, animate=False)
+                try:
+                    self.fixed_table.move_cursor(row=target_cursor_row, animate=False)
+                    local_col = (
+                        self.current_sample_idx
+                        if len(self.samples) <= self.sample_window_size
+                        else max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start))
+                    )
+                    self.sample_table.move_cursor(row=target_cursor_row, column=local_col, animate=False)
+                except Exception:
+                    pass
         finally:
             self._is_shifting = False
 
@@ -388,10 +515,10 @@ class VariantSplitView(Widget):
         self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
     def rebuild_fixed_table(self):
-        """Constructs left fixed variant columns and sets width."""
+        """Constructs left fixed variant columns and sets width with intact chromosome names."""
         self.fixed_table.clear(columns=True)
 
-        target_width = self.FIXED_WIDTHS.get(self.view_mode, 48)
+        target_width = self.FIXED_WIDTHS.get(self.view_mode, 56)
         self.fixed_table.styles.width = target_width
 
         if self.view_mode == "raw":
@@ -407,25 +534,27 @@ class VariantSplitView(Widget):
             self.fixed_table.add_column(Text(col, style="bold cyan"), key=f"f_{col}")
 
         for r_idx, r in enumerate(self.records):
-            chrom_short = r.chrom.replace("Pf3D7_", "Pf").replace("_v3", "")
+            # Display full exact chromosome name without normalization or substring replacement
+            chrom_display = r.chrom
             if self.view_mode == "raw":
                 qual_str = f"{r.qual:.0f}" if r.qual is not None else "."
                 info_short = f"GENE={r.gene};MUT={r.mutation}"
                 row_cells = [
-                    chrom_short, str(r.pos), r.var_id, r.ref, r.alt_str,
+                    chrom_display, str(r.pos), r.var_id, r.ref, r.alt_str,
                     qual_str, r.filter, info_short, ":".join(r.format_keys[:3])
                 ]
             elif self.view_mode == "compact":
-                row_cells = [chrom_short, str(r.pos), r.ref, r.alt_str]
+                row_cells = [chrom_display, str(r.pos), r.ref, r.alt_str]
             elif self.view_mode == "essential":
-                row_cells = [chrom_short, str(r.pos)]
+                row_cells = [chrom_display, str(r.pos)]
             else:  # "normal"
                 qual_str = f"{r.qual:.0f}" if r.qual is not None else "."
                 filter_styled = Text(r.filter, style="green" if r.filter == "PASS" else "red")
                 gene_styled = Text(r.gene, style="bold yellow" if r.drug_annotation else "white")
-                row_cells = [chrom_short, str(r.pos), r.ref, r.alt_str, qual_str, filter_styled, gene_styled]
+                row_cells = [chrom_display, str(r.pos), r.ref, r.alt_str, qual_str, filter_styled, gene_styled]
 
             self.fixed_table.add_row(*row_cells, key=f"frow_{r_idx}")
+
 
     def get_visible_samples(self) -> List[str]:
         if len(self.samples) <= self.sample_window_size:
@@ -512,18 +641,27 @@ class VariantSplitView(Widget):
 
     def _check_buffer_boundary(self, target_row: int) -> None:
         """Dynamically shift buffer window when cursor approaches top or bottom edge."""
-        if not self.reader or self._is_shifting or self.total_records_count <= self.window_size:
+        if not self.reader or self._is_shifting:
             return
         buffer_len = len(self.records)
         shift_step = 40
-        if target_row >= buffer_len - 15 and (self.buffer_start + buffer_len) < self.total_records_count:
-            new_start = min(self.total_records_count - self.window_size, self.buffer_start + shift_step)
-            new_cursor = max(0, target_row - (new_start - self.buffer_start))
-            self.shift_buffer(new_start, target_cursor_row=new_cursor)
+        if target_row >= buffer_len - 15:
+            # Approaching bottom boundary
+            if self.total_records_count is not None and (self.buffer_start + buffer_len) >= self.total_records_count:
+                return
+            new_start = self.buffer_start + shift_step
+            if self.total_records_count is not None:
+                new_start = min(self.total_records_count - self.window_size, new_start)
+            if new_start > self.buffer_start:
+                new_cursor = max(0, target_row - (new_start - self.buffer_start))
+                self.shift_buffer(new_start, target_cursor_row=new_cursor)
         elif target_row <= 15 and self.buffer_start > 0:
+            # Approaching top boundary
             new_start = max(0, self.buffer_start - shift_step)
-            new_cursor = min(self.window_size - 1, target_row + (self.buffer_start - new_start))
-            self.shift_buffer(new_start, target_cursor_row=new_cursor)
+            if new_start < self.buffer_start:
+                new_cursor = min(self.window_size - 1, target_row + (self.buffer_start - new_start))
+                self.shift_buffer(new_start, target_cursor_row=new_cursor)
+
 
     # Synchronize Cursor Movement (Arrow Up/Down, Cell Selection)
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
