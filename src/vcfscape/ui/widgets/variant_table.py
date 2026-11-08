@@ -181,7 +181,7 @@ class SampleMatrixTable(DataTable):
         try:
             if hasattr(self, "_get_cell_region"):
                 coord = getattr(self, "cursor_coordinate", None)
-                if coord is not None:
+                if coord is not None and getattr(coord, "column", None) == col_idx:
                     reg = self._get_cell_region(coord)
                     return reg.x, reg.x + reg.width
         except Exception:
@@ -192,8 +192,13 @@ class SampleMatrixTable(DataTable):
         try:
             cols = list(self.columns.values())
             if 0 <= col_idx < len(cols):
-                col_left = sum(c.width for c in cols[:col_idx])
-                col_width = cols[col_idx].width
+                def _w(c):
+                    return max(4, int(getattr(c, "width", None) or getattr(c, "auto_width", None) or 8))
+                col_left = sum(_w(c) for c in cols[:col_idx])
+                col_width = _w(cols[col_idx])
+            else:
+                col_left = col_idx * 8
+                col_width = 8
         except Exception:
             col_left = col_idx * 8
             col_width = 8
@@ -212,8 +217,22 @@ class SampleMatrixTable(DataTable):
             return getattr(size_obj, "width", 80) or 80
         return 80
 
-    def scroll_column_centered(self, col_idx: int) -> None:
-        """Auto-centers the active sample column in the visible viewport."""
+    def is_column_in_viewport(self, col_idx: int) -> bool:
+        """Check if column is fully visible within current horizontal viewport."""
+        vp_width = self._get_viewport_width()
+        col_left, col_right = self._get_column_bounds(col_idx)
+        vp_left = getattr(self, "scroll_x", 0)
+        vp_right = vp_left + vp_width
+        return col_left >= vp_left and col_right <= vp_right
+
+    def scroll_column_centered(self, col_idx: int, force: bool = False) -> None:
+        """Auto-centers the active sample column in the visible viewport.
+        Only performs auto-centering if the pointer passes the edge of the viewport,
+        or if force is True (e.g. when the sample window shifts).
+        """
+        if not force and self.is_column_in_viewport(col_idx):
+            return
+
         vp_width = self._get_viewport_width()
         col_left, col_right = self._get_column_bounds(col_idx)
         col_center = (col_left + col_right) // 2
@@ -477,8 +496,8 @@ class VariantSplitView(Widget):
 
         self.set_active_sample(target_global)
 
-    def set_active_sample(self, global_col: int) -> None:
-        """Sets active sample column, dynamically sliding sample window with smooth auto-centering."""
+    def set_active_sample(self, global_col: int, force_center: bool = False) -> None:
+        """Sets active sample column, dynamically sliding sample window when passing viewport/window edge."""
         if not self.samples:
             return
         global_col = max(0, min(len(self.samples) - 1, global_col))
@@ -490,7 +509,7 @@ class VariantSplitView(Widget):
                 self.sample_table.move_cursor(row=self.current_row_idx, column=local_col, animate=False)
             except Exception:
                 pass
-            self.sample_table.scroll_column_centered(local_col)
+            self.sample_table.scroll_column_centered(local_col, force=force_center)
             self._notify_selection(self.current_row_idx, self.current_sample_idx)
             return
 
@@ -498,7 +517,9 @@ class VariantSplitView(Widget):
         half_win = self.sample_window_size // 2
         target_win_start = max(0, min(len(self.samples) - self.sample_window_size, global_col - half_win))
 
+        window_shifted = False
         if target_win_start != self.sample_window_start:
+            window_shifted = True
             self.sample_window_start = target_win_start
             self._rebuilding = True
             try:
@@ -511,7 +532,7 @@ class VariantSplitView(Widget):
             self.sample_table.move_cursor(row=self.current_row_idx, column=local_col, animate=False)
         except Exception:
             pass
-        self.sample_table.scroll_column_centered(local_col)
+        self.sample_table.scroll_column_centered(local_col, force=(force_center or window_shifted))
         self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
     def can_advance_row(self, forward: bool) -> bool:

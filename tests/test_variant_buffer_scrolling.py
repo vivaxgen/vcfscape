@@ -37,8 +37,11 @@ except ImportError:
             pass
         def add_row(self, *args, **kwargs):
             pass
-        def scroll_to(self, *args, **kwargs):
-            pass
+        def scroll_to(self, x=None, y=None, *args, **kwargs):
+            if x is not None:
+                self.scroll_x = x
+            if y is not None:
+                self.scroll_y = y
         def move_cursor(self, row=None, column=None, animate=False):
             if row is not None:
                 self.cursor_row = row
@@ -244,7 +247,51 @@ class TestVariantBufferScrolling(unittest.TestCase):
         for idx, rec in enumerate(sv.records):
             self.assertEqual(rec.chrom, chrom_names[idx])
 
+    def test_auto_centering_only_when_pointer_passes_viewport_edge(self):
+        """Verify that auto-centering only occurs when the pointer passes the edge of the viewport."""
+        samples_10 = [f"Sample_{i}" for i in range(10)]
+        sv = VariantSplitView(self.records[:5], samples_10, reader=None)
+        table = sv.sample_table
+
+        # Override viewport width to 40 characters (columns are 8 chars wide each, so ~5 cols fit)
+        table._get_viewport_width = lambda: 40
+
+        table.scroll_x = 0
+        self.assertTrue(table.is_column_in_viewport(0))
+        self.assertTrue(table.is_column_in_viewport(1))
+        self.assertTrue(table.is_column_in_viewport(2))
+        self.assertTrue(table.is_column_in_viewport(3))
+        self.assertTrue(table.is_column_in_viewport(4))  # Col 4 bounds: 32..40, fully in [0..40]
+        self.assertFalse(table.is_column_in_viewport(5)) # Col 5 bounds: 40..48, passes right edge
+
+        # Moving within viewport: col 0 -> col 1 -> col 2 -> col 3 -> col 4
+        # scroll_x MUST stay at 0 (no auto-centering)
+        for col in range(1, 5):
+            table.scroll_column_centered(col)
+            self.assertEqual(table.scroll_x, 0, f"Column {col} is inside viewport, scroll_x should not change")
+
+        # Now pointer passes the right edge: moving to col 5 (bounds 40..48)
+        table.scroll_column_centered(5)
+        # It must auto-center col 5:
+        # col_center = (40 + 48) // 2 = 44. target_x = max(0, 44 - 20) = 24.
+        self.assertEqual(table.scroll_x, 24)
+
+        # Now within new viewport [24..64]: col 5 (40..48) and col 6 (48..56) are inside
+        self.assertTrue(table.is_column_in_viewport(5))
+        self.assertTrue(table.is_column_in_viewport(6))
+        table.scroll_column_centered(6)
+        # Should NOT change scroll_x:
+        self.assertEqual(table.scroll_x, 24)
+
+        # Moving backward: col 2 (16..24) passes left edge of viewport [24..64]
+        self.assertFalse(table.is_column_in_viewport(2))
+        table.scroll_column_centered(2)
+        # Auto-centers col 2:
+        # col_center = 20. target_x = max(0, 20 - 20) = 0.
+        self.assertEqual(table.scroll_x, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
