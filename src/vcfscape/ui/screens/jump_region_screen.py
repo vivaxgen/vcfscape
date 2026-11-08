@@ -43,7 +43,7 @@ class JumpRegionScreen(ModalScreen[Optional[Tuple[str, int]]]):
 
     #jump_hint {
         color: #94a3b8;
-        font-size: 80%;
+        text-style: italic;
         margin-bottom: 1;
     }
 

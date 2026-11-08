@@ -90,7 +90,7 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
 
     #hint_label {
         color: #94a3b8;
-        font-size: 80%;
+        text-style: italic;
         content-align: center middle;
         width: 100%;
         margin-bottom: 1;
