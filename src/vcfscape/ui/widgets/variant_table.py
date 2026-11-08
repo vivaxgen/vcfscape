@@ -80,26 +80,42 @@ class FixedVariantTable(DataTable):
             super().action_cursor_right()
 
     def action_cursor_down(self) -> None:
-        old_row = self.cursor_row
-        super().action_cursor_down()
         sv = getattr(self, "split_view", None) or self.parent
         while sv is not None and not hasattr(sv, "shift_buffer"):
             sv = sv.parent
-        if sv is not None:
-            # If cursor reached or exceeded bottom boundary or cannot move down further, request parent shift
+
+        old_row = self.cursor_row
+        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=True):
             if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=True, step=30)
+                sv.advance_row(forward=True)
+                return
+
+        super().action_cursor_down()
+        if sv is not None:
+            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
+                if hasattr(sv, "advance_row"):
+                    sv.advance_row(forward=True)
+                else:
+                    sv.request_scroll_shift(forward=True, step=30)
 
     def action_cursor_up(self) -> None:
-        old_row = self.cursor_row
-        super().action_cursor_up()
         sv = getattr(self, "split_view", None) or self.parent
         while sv is not None and not hasattr(sv, "shift_buffer"):
             sv = sv.parent
-        if sv is not None:
-            # If cursor reached top boundary, request parent shift backward
+
+        old_row = self.cursor_row
+        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=False):
             if self.cursor_row <= 0 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=False, step=30)
+                sv.advance_row(forward=False)
+                return
+
+        super().action_cursor_up()
+        if sv is not None:
+            if self.cursor_row <= 0 or self.cursor_row == old_row:
+                if hasattr(sv, "advance_row"):
+                    sv.advance_row(forward=False)
+                else:
+                    sv.request_scroll_shift(forward=False, step=30)
 
     def action_page_down(self) -> None:
         old_row = self.cursor_row
@@ -185,95 +201,90 @@ class SampleMatrixTable(DataTable):
 
     def _get_viewport_width(self) -> int:
         """Get the visible content viewport width."""
-        if hasattr(self, "scrollable_content_region") and self.scrollable_content_region.width > 0:
-            return self.scrollable_content_region.width
-        if hasattr(self, "content_size") and self.content_size.width > 0:
-            return self.content_size.width
-        return getattr(self.size, "width", 80) or 80
+        scr = getattr(self, "scrollable_content_region", None)
+        if scr is not None and getattr(scr, "width", 0) > 0:
+            return scr.width
+        cs = getattr(self, "content_size", None)
+        if cs is not None and getattr(cs, "width", 0) > 0:
+            return cs.width
+        size_obj = getattr(self, "size", None)
+        if size_obj is not None:
+            return getattr(size_obj, "width", 80) or 80
+        return 80
+
+    def scroll_column_centered(self, col_idx: int) -> None:
+        """Auto-centers the active sample column in the visible viewport."""
+        vp_width = self._get_viewport_width()
+        col_left, col_right = self._get_column_bounds(col_idx)
+        col_center = (col_left + col_right) // 2
+        target_x = max(0, col_center - (vp_width // 2))
+        if abs(getattr(self, "scroll_x", 0) - target_x) > 1:
+            try:
+                self.scroll_to(x=target_x, animate=False, force=True)
+            except Exception:
+                pass
 
     def scroll_column_half_screen(self, col_idx: int) -> None:
-        """Scroll container half screen if cursor column moves beyond viewport edges."""
-        vp_width = self._get_viewport_width()
-        half_screen = max(1, vp_width // 2)
-        scroll_x = getattr(self, "scroll_x", 0)
-        viewport_left = scroll_x
-        viewport_right = scroll_x + vp_width
-
-        col_left, col_right = self._get_column_bounds(col_idx)
-
-        if col_idx == 0:
-            self.scroll_to(x=0, animate=False, force=True)
-            return
-
-        if col_right > viewport_right:
-            # Cursor moved beyond the right edge: scroll half screen to the right
-            target_x = scroll_x + half_screen
-            target_x = max(target_x, col_right - vp_width + 2)
-            self.scroll_to(x=target_x, animate=False, force=True)
-        elif col_left < viewport_left:
-            # Cursor moved beyond the left edge: scroll half screen to the left
-            target_x = max(0, scroll_x - half_screen)
-            target_x = min(target_x, col_left)
-            self.scroll_to(x=target_x, animate=False, force=True)
+        """Backward-compatible helper that auto-centers active column in viewport."""
+        self.scroll_column_centered(col_idx)
 
     def action_cursor_right(self) -> None:
-        old_scroll_x = getattr(self, "scroll_x", 0)
-        vp_width = self._get_viewport_width()
-        viewport_right = old_scroll_x + vp_width
-
-        super().action_cursor_right()
-
-        new_coord = getattr(self, "cursor_coordinate", None)
-        new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
-        col_left, col_right = self._get_column_bounds(new_col)
-
-        if col_right > viewport_right or getattr(self, "scroll_x", 0) > old_scroll_x:
-            half_screen = max(1, vp_width // 2)
-            target_x = old_scroll_x + half_screen
-            target_x = max(target_x, col_right - vp_width + 2)
-            self.scroll_to(x=target_x, animate=False, force=True)
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "can_advance_sample") and sv.can_advance_sample(forward=True):
+            sv.advance_sample(forward=True)
+        else:
+            super().action_cursor_right()
+            new_coord = getattr(self, "cursor_coordinate", None)
+            new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
+            self.scroll_column_centered(new_col)
 
     def action_cursor_left(self) -> None:
-        old_scroll_x = getattr(self, "scroll_x", 0)
-        vp_width = self._get_viewport_width()
-        viewport_left = old_scroll_x
-
-        super().action_cursor_left()
-
-        new_coord = getattr(self, "cursor_coordinate", None)
-        new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
-
-        if new_col == 0:
-            self.scroll_to(x=0, animate=False, force=True)
-            return
-
-        col_left, col_right = self._get_column_bounds(new_col)
-
-        if col_left < viewport_left or getattr(self, "scroll_x", 0) < old_scroll_x:
-            half_screen = max(1, vp_width // 2)
-            target_x = max(0, old_scroll_x - half_screen)
-            target_x = min(target_x, col_left)
-            self.scroll_to(x=target_x, animate=False, force=True)
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "can_advance_sample") and sv.can_advance_sample(forward=False):
+            sv.advance_sample(forward=False)
+        else:
+            super().action_cursor_left()
+            new_coord = getattr(self, "cursor_coordinate", None)
+            new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
+            self.scroll_column_centered(new_col)
 
     def action_cursor_down(self) -> None:
-        old_row = self.cursor_row
-        super().action_cursor_down()
         sv = getattr(self, "split_view", None) or self.parent
         while sv is not None and not hasattr(sv, "shift_buffer"):
             sv = sv.parent
+
+        old_row = self.cursor_row
+        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=True):
+            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
+                sv.advance_row(forward=True)
+                return
+
+        super().action_cursor_down()
         if sv is not None:
             if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=True, step=30)
+                if hasattr(sv, "advance_row"):
+                    sv.advance_row(forward=True)
+                else:
+                    sv.request_scroll_shift(forward=True, step=30)
 
     def action_cursor_up(self) -> None:
-        old_row = self.cursor_row
-        super().action_cursor_up()
         sv = getattr(self, "split_view", None) or self.parent
         while sv is not None and not hasattr(sv, "shift_buffer"):
             sv = sv.parent
+
+        old_row = self.cursor_row
+        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=False):
+            if self.cursor_row <= 0 or self.cursor_row == old_row:
+                sv.advance_row(forward=False)
+                return
+
+        super().action_cursor_up()
         if sv is not None:
             if self.cursor_row <= 0 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=False, step=30)
+                if hasattr(sv, "advance_row"):
+                    sv.advance_row(forward=False)
+                else:
+                    sv.request_scroll_shift(forward=False, step=30)
 
     def action_page_down(self) -> None:
         old_row = self.cursor_row
@@ -420,35 +431,279 @@ class VariantSplitView(Widget):
         """Update total variant count when background counter completes."""
         self.total_records_count = count
 
+    def _get_local_sample_col(self) -> int:
+        if len(self.samples) <= self.sample_window_size:
+            return max(0, min(len(self.samples) - 1, self.current_sample_idx))
+        return max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start))
+
+    def _sync_both_tables_cursor(self, row: int, col: int) -> None:
+        self._syncing_cursor = True
+        try:
+            try:
+                self.fixed_table.move_cursor(row=row, animate=False)
+            except (TypeError, Exception):
+                try:
+                    self.fixed_table.move_cursor(row=row)
+                except Exception:
+                    pass
+
+            try:
+                self.sample_table.move_cursor(row=row, column=col, animate=False)
+            except (TypeError, Exception):
+                try:
+                    self.sample_table.move_cursor(row=row, column=col)
+                except Exception:
+                    pass
+        finally:
+            self._syncing_cursor = False
+
+    def can_advance_sample(self, forward: bool) -> bool:
+        if not self.samples:
+            return False
+        if forward:
+            return self.current_sample_idx < len(self.samples) - 1
+        return self.current_sample_idx > 0
+
+    def advance_sample(self, forward: bool) -> None:
+        if not self.samples:
+            return
+        if forward:
+            target_global = min(len(self.samples) - 1, self.current_sample_idx + 1)
+        else:
+            target_global = max(0, self.current_sample_idx - 1)
+
+        if target_global == self.current_sample_idx:
+            return
+
+        self.set_active_sample(target_global)
+
+    def set_active_sample(self, global_col: int) -> None:
+        """Sets active sample column, dynamically sliding sample window with smooth auto-centering."""
+        if not self.samples:
+            return
+        global_col = max(0, min(len(self.samples) - 1, global_col))
+        self.current_sample_idx = global_col
+
+        if len(self.samples) <= self.sample_window_size:
+            local_col = global_col
+            try:
+                self.sample_table.move_cursor(row=self.current_row_idx, column=local_col, animate=False)
+            except Exception:
+                pass
+            self.sample_table.scroll_column_centered(local_col)
+            self._notify_selection(self.current_row_idx, self.current_sample_idx)
+            return
+
+        # Large sample cohort: dynamic windowing auto-centered around active sample
+        half_win = self.sample_window_size // 2
+        target_win_start = max(0, min(len(self.samples) - self.sample_window_size, global_col - half_win))
+
+        if target_win_start != self.sample_window_start:
+            self.sample_window_start = target_win_start
+            self._rebuilding = True
+            try:
+                self.rebuild_sample_table()
+            finally:
+                self._rebuilding = False
+
+        local_col = global_col - self.sample_window_start
+        try:
+            self.sample_table.move_cursor(row=self.current_row_idx, column=local_col, animate=False)
+        except Exception:
+            pass
+        self.sample_table.scroll_column_centered(local_col)
+        self._notify_selection(self.current_row_idx, self.current_sample_idx)
+
+    def can_advance_row(self, forward: bool) -> bool:
+        if not self.reader:
+            return False
+        curr_global = self.buffer_start + self.current_row_idx
+        if forward:
+            if self.total_records_count is not None:
+                return curr_global < self.total_records_count - 1
+            return True
+        return curr_global > 0
+
+    def advance_row(self, forward: bool) -> None:
+        """Advance cursor by 1 row across buffer window boundaries without snapback."""
+        curr_global = self.buffer_start + self.current_row_idx
+        if forward:
+            target_global = curr_global + 1
+            if self.total_records_count is not None and target_global >= self.total_records_count:
+                return
+        else:
+            target_global = max(0, curr_global - 1)
+
+        self.set_active_row(target_global)
+
+    def set_active_row(self, target_global: int) -> None:
+        """Sets active variant row by global index, sliding buffer smoothly while pinning viewport."""
+        if target_global < 0:
+            return
+        if self.total_records_count is not None and target_global >= self.total_records_count:
+            return
+
+        local_row = target_global - self.buffer_start
+        margin = 15
+        needs_shift = (
+            local_row < margin and self.buffer_start > 0
+        ) or (
+            local_row >= len(self.records) - margin and (
+                self.total_records_count is None or (self.buffer_start + len(self.records)) < self.total_records_count
+            )
+        )
+
+        if not needs_shift and 0 <= local_row < len(self.records):
+            # Target is inside current slice: move cursor directly without buffer rebuild
+            self.current_row_idx = local_row
+            local_col = self._get_local_sample_col()
+            self._sync_both_tables_cursor(local_row, local_col)
+            self._notify_selection(local_row, self.current_sample_idx)
+            return
+
+        # Needs buffer shift: compute new_buffer_start so target_global is placed nicely
+        shift_step = 40
+        if local_row >= len(self.records) - margin:
+            # Moving forward
+            new_start = self.buffer_start + shift_step
+            if self.total_records_count is not None:
+                max_start = max(0, self.total_records_count - self.window_size)
+                new_start = min(max_start, new_start)
+        else:
+            # Moving backward
+            new_start = max(0, self.buffer_start - shift_step)
+
+        if new_start == self.buffer_start:
+            # Cannot shift further (e.g. at end of file)
+            local_row = max(0, min(len(self.records) - 1, target_global - self.buffer_start))
+            self.current_row_idx = local_row
+            local_col = self._get_local_sample_col()
+            self._sync_both_tables_cursor(local_row, local_col)
+            self._notify_selection(local_row, self.current_sample_idx)
+            return
+
+        # Capture current screen line before shifting to preserve exact visual anchor
+        old_scroll_y = getattr(self.fixed_table, "scroll_y", 0)
+        screen_y_offset = max(0, self.current_row_idx - old_scroll_y)
+
+        self._is_shifting = True
+        try:
+            new_records = self.reader.get_slice(new_start, self.window_size)
+            if not new_records:
+                if self.total_records_count is None:
+                    self.total_records_count = self.buffer_start + len(self.records)
+                return
+
+            self.buffer_start = new_start
+            self.records = new_records
+            if len(new_records) < self.window_size and self.total_records_count is None:
+                self.total_records_count = new_start + len(new_records)
+
+            new_local_row = max(0, min(len(self.records) - 1, target_global - new_start))
+            self.current_row_idx = new_local_row
+
+            self.rebuild_tables()
+
+            # Target scroll_y keeps the record on the exact same screen line:
+            target_scroll_y = max(0, new_local_row - screen_y_offset)
+            try:
+                self.fixed_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+                self.sample_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+            except Exception:
+                pass
+
+            local_col = self._get_local_sample_col()
+            self._sync_both_tables_cursor(new_local_row, local_col)
+            self._notify_selection(new_local_row, self.current_sample_idx)
+        finally:
+            self._is_shifting = False
+
     def request_scroll_shift(self, forward: bool = True, step: int = 40) -> None:
         """Called by child tables when cursor or scroll reaches the buffer boundary."""
         if not self.reader or self._is_shifting or self._rebuilding:
             return
 
+        curr_global = self.buffer_start + self.current_row_idx
         if forward:
-            # Shift forward
+            target_global = curr_global + (1 if self.current_row_idx >= len(self.records) - 1 else 0)
             if self.total_records_count is not None:
                 max_start = max(0, self.total_records_count - self.window_size)
-                if self.buffer_start >= max_start:
+                if self.buffer_start >= max_start and self.current_row_idx >= len(self.records) - 1:
                     return
                 new_start = min(max_start, self.buffer_start + step)
             else:
                 new_start = self.buffer_start + step
 
             if new_start > self.buffer_start:
-                new_cursor = max(0, min(len(self.records) - 1, self.current_row_idx - (new_start - self.buffer_start)))
-                self.shift_buffer(new_start, target_cursor_row=new_cursor)
+                old_scroll_y = getattr(self.fixed_table, "scroll_y", 0)
+                screen_y_offset = max(0, self.current_row_idx - old_scroll_y)
+
+                self._is_shifting = True
+                try:
+                    new_records = self.reader.get_slice(new_start, self.window_size)
+                    if not new_records:
+                        if self.total_records_count is None:
+                            self.total_records_count = self.buffer_start + len(self.records)
+                        return
+                    self.buffer_start = new_start
+                    self.records = new_records
+                    if len(new_records) < self.window_size and self.total_records_count is None:
+                        self.total_records_count = new_start + len(new_records)
+
+                    new_local_row = max(0, min(len(self.records) - 1, target_global - new_start))
+                    self.current_row_idx = new_local_row
+
+                    self.rebuild_tables()
+
+                    target_scroll_y = max(0, new_local_row - screen_y_offset)
+                    try:
+                        self.fixed_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+                        self.sample_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+                    except Exception:
+                        pass
+
+                    local_col = self._get_local_sample_col()
+                    self._sync_both_tables_cursor(new_local_row, local_col)
+                    self._notify_selection(new_local_row, self.current_sample_idx)
+                finally:
+                    self._is_shifting = False
         else:
-            # Shift backward
             if self.buffer_start <= 0:
                 return
             new_start = max(0, self.buffer_start - step)
             if new_start < self.buffer_start:
-                new_cursor = min(self.window_size - 1, self.current_row_idx + (self.buffer_start - new_start))
-                self.shift_buffer(new_start, target_cursor_row=new_cursor)
+                target_global = max(0, curr_global - (1 if self.current_row_idx <= 0 else 0))
+                old_scroll_y = getattr(self.fixed_table, "scroll_y", 0)
+                screen_y_offset = max(0, self.current_row_idx - old_scroll_y)
+
+                self._is_shifting = True
+                try:
+                    new_records = self.reader.get_slice(new_start, self.window_size)
+                    if not new_records:
+                        return
+                    self.buffer_start = new_start
+                    self.records = new_records
+
+                    new_local_row = max(0, min(len(self.records) - 1, target_global - new_start))
+                    self.current_row_idx = new_local_row
+
+                    self.rebuild_tables()
+
+                    target_scroll_y = max(0, new_local_row - screen_y_offset)
+                    try:
+                        self.fixed_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+                        self.sample_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+                    except Exception:
+                        pass
+
+                    local_col = self._get_local_sample_col()
+                    self._sync_both_tables_cursor(new_local_row, local_col)
+                    self._notify_selection(new_local_row, self.current_sample_idx)
+                finally:
+                    self._is_shifting = False
 
     def shift_buffer(self, new_start: int, target_cursor_row: Optional[int] = None) -> None:
-        """Shifts the live row buffer window dynamically without lag."""
+        """Shifts the live row buffer window dynamically while pinning cursor and viewport."""
         if not self.reader or self._is_shifting or self._rebuilding:
             return
 
@@ -461,6 +716,10 @@ class VariantSplitView(Widget):
 
         if new_start == self.buffer_start:
             return
+
+        curr_global = self.buffer_start + self.current_row_idx
+        old_scroll_y = getattr(self.fixed_table, "scroll_y", 0)
+        screen_y_offset = max(0, self.current_row_idx - old_scroll_y)
 
         self._is_shifting = True
         try:
@@ -475,34 +734,23 @@ class VariantSplitView(Widget):
                 self.total_records_count = new_start + len(new_records)
 
             if target_cursor_row is not None:
-                self.current_row_idx = max(0, min(target_cursor_row, len(self.records) - 1))
+                new_local_row = max(0, min(len(self.records) - 1, target_cursor_row))
             else:
-                self.current_row_idx = max(0, min(self.current_row_idx, len(self.records) - 1))
+                new_local_row = max(0, min(len(self.records) - 1, curr_global - new_start))
 
+            self.current_row_idx = new_local_row
             self.rebuild_tables()
 
-            final_row = self.current_row_idx
-            if 0 <= final_row < len(self.records):
-                local_col = (
-                    self.current_sample_idx
-                    if len(self.samples) <= self.sample_window_size
-                    else max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start))
-                )
-                try:
-                    self.fixed_table.move_cursor(row=final_row, animate=False)
-                except (TypeError, Exception):
-                    try:
-                        self.fixed_table.move_cursor(row=final_row)
-                    except Exception:
-                        pass
+            target_scroll_y = max(0, new_local_row - screen_y_offset)
+            try:
+                self.fixed_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+                self.sample_table.scroll_to(y=target_scroll_y, animate=False, force=True)
+            except Exception:
+                pass
 
-                try:
-                    self.sample_table.move_cursor(row=final_row, column=local_col, animate=False)
-                except (TypeError, Exception):
-                    try:
-                        self.sample_table.move_cursor(row=final_row, column=local_col)
-                    except Exception:
-                        pass
+            local_col = self._get_local_sample_col()
+            self._sync_both_tables_cursor(new_local_row, local_col)
+            self._notify_selection(new_local_row, self.current_sample_idx)
         finally:
             self._is_shifting = False
 
@@ -630,28 +878,8 @@ class VariantSplitView(Widget):
         """Dynamically shifts horizontal sample column window when cursor reaches window edge."""
         if len(self.samples) <= self.sample_window_size:
             return
-
-        step = 8
-        if local_col >= self.sample_window_size - 2 and (self.sample_window_start + self.sample_window_size) < len(self.samples):
-            new_start = min(len(self.samples) - self.sample_window_size, self.sample_window_start + step)
-            if new_start != self.sample_window_start:
-                new_local_col = max(0, self.current_sample_idx - new_start)
-                self.sample_window_start = new_start
-                self.rebuild_sample_table()
-                try:
-                    self.sample_table.move_cursor(row=self.current_row_idx, column=new_local_col, animate=False)
-                except Exception:
-                    pass
-        elif local_col <= 2 and self.sample_window_start > 0:
-            new_start = max(0, self.sample_window_start - step)
-            if new_start != self.sample_window_start:
-                new_local_col = min(self.sample_window_size - 1, self.current_sample_idx - new_start)
-                self.sample_window_start = new_start
-                self.rebuild_sample_table()
-                try:
-                    self.sample_table.move_cursor(row=self.current_row_idx, column=new_local_col, animate=False)
-                except Exception:
-                    pass
+        if local_col >= self.sample_window_size - 2 or local_col <= 2:
+            self.set_active_sample(self.current_sample_idx)
 
     def _style_sample_cell(self, val: str, tag: str) -> Text:
         """Styling for sample genotype/depth cells."""
@@ -693,26 +921,9 @@ class VariantSplitView(Widget):
         if not self.reader or self._is_shifting or self._rebuilding:
             return
         buffer_len = len(self.records)
-        shift_step = 40
-        if target_row >= buffer_len - 15:
-            # Approaching bottom boundary
-            if self.total_records_count is not None:
-                max_start = max(0, self.total_records_count - self.window_size)
-                if self.buffer_start >= max_start:
-                    return
-                new_start = min(max_start, self.buffer_start + shift_step)
-            else:
-                new_start = self.buffer_start + shift_step
-
-            if new_start > self.buffer_start:
-                new_cursor = max(0, min(buffer_len - 1, target_row - (new_start - self.buffer_start)))
-                self.shift_buffer(new_start, target_cursor_row=new_cursor)
-        elif target_row <= 15 and self.buffer_start > 0:
-            # Approaching top boundary
-            new_start = max(0, self.buffer_start - shift_step)
-            if new_start < self.buffer_start:
-                new_cursor = min(self.window_size - 1, target_row + (self.buffer_start - new_start))
-                self.shift_buffer(new_start, target_cursor_row=new_cursor)
+        if target_row >= buffer_len - 15 or (target_row <= 15 and self.buffer_start > 0):
+            target_global = self.buffer_start + target_row
+            self.set_active_row(target_global)
 
 
     # Synchronize Cursor Movement (Arrow Up/Down, Cell Selection)
@@ -770,7 +981,7 @@ class VariantSplitView(Widget):
             if self.current_row_idx != target_row or self.current_sample_idx != global_col:
                 self.current_row_idx = target_row
                 self.current_sample_idx = global_col
-                self.sample_table.scroll_column_half_screen(target_local_col)
+                self.sample_table.scroll_column_centered(target_local_col)
                 self._notify_selection(self.current_row_idx, self.current_sample_idx)
                 self._check_buffer_boundary(target_row)
                 self._check_sample_window_boundary(target_local_col)

@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan to fix Textual and Web virtual buffer scrolling past 150 variants, eliminate chromosome name mutilation by always displaying full unmodified chromosome names, and ensure seamless cursor tracking and selection synchronization.",
-  "updatedAt": "2026-11-06T11:09:10.546183908Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Implementation plan to fundamentally fix buffer window scrolling in the Textual TUI:\n- Pin the cursor to the exact genomic record without screen jumping or pointer snapbacks when shifting vertical windows.\n- Auto-center the active sample column in the viewport when navigating horizontally across sample boundaries.\n- Maintain seamless viewport scroll offsets during buffer reloads and eliminate jarring relative pointer regressions.",
+  "updatedAt":  "2026-11-08T02:22:40.758887608Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }
