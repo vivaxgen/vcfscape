@@ -212,6 +212,7 @@ class VcfReader:
         self._total_variants_count: Optional[int] = None
         self._counting_thread: Optional[threading.Thread] = None
         self._count_callbacks: List[Callable[[int], None]] = []
+        self._progress_callbacks: List[Callable[[int], None]] = []
 
         # 1. Fast Header Extraction (always executes in < 15ms)
         self._load_header_only()
@@ -282,7 +283,18 @@ class VcfReader:
                     for line in f:
                         if line and not line.startswith("#"):
                             count += 1
+                            if count % 1000 == 0:
+                                for pcb in list(self._progress_callbacks):
+                                    try:
+                                        pcb(count)
+                                    except Exception:
+                                        pass
                 self._total_variants_count = count
+                for pcb in list(self._progress_callbacks):
+                    try:
+                        pcb(count)
+                    except Exception:
+                        pass
                 for cb in list(self._count_callbacks):
                     try:
                         cb(count)
@@ -293,6 +305,15 @@ class VcfReader:
 
         self._counting_thread = threading.Thread(target=_count_worker, daemon=True)
         self._counting_thread.start()
+
+    def add_progress_callback(self, cb: Callable[[int], None]):
+        """Register a callback for periodic progress updates during background counting."""
+        self._progress_callbacks.append(cb)
+        if self._total_variants_count is not None:
+            try:
+                cb(self._total_variants_count)
+            except Exception:
+                pass
 
     def add_total_variants_callback(self, cb: Callable[[int], None]):
         """Register a callback for when variant counting completes asynchronously."""

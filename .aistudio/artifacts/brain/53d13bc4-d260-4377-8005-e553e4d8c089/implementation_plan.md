@@ -1,107 +1,100 @@
-# Textual Variant Table Scrolling Overhaul
+# VCF File Reading Loading Indicator (Modal Popup)
 
-A complete overhaul and simplification of the Textual TUI variant table scrolling architecture in VCFscape. This plan eliminates the root causes of flickering, scroll lockup, and cursor resets by moving from destructive `clear(columns=True)` rebuilds to in-place virtual row updates and native horizontal scrolling across all cohort samples.
+Add an intuitive visual cue—a centered modal popup dialog with an animated spinner and live variant count progress—when reading, indexing, and parsing VCF files, giving users clear visual feedback that the application is actively processing their data.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following architectural decisions were confirmed via interactive user clarification and govern this overhaul:
+> The following design choices were confirmed via interactive user clarification and govern this implementation:
 
-- **Confirmed Decision 1 (Vertical Buffer Navigation)**: Overhaul the vertical variant buffer using **in-place row cell updates** within a stable virtual row pool, completely eliminating table clearing (`clear()`) during buffer window shifts.
-- **Confirmed Decision 2 (Horizontal Sample Navigation)**: Load **all sample columns upfront** with Textual's native horizontal scrolling, eliminating dynamic column window rebuilds, column pagination, and horizontal snapback.
-- **Visual Layout Guarantee**: The existing split-screen visual layout (left fixed columns, divider, right scrollable sample matrix, cohort statistics pane, and sidebar) remains 100% intact.
+- **Confirmed Decision 1 (Loading Cue Type)**: Centered modal popup dialog with an animated spinner.
+- **Confirmed Decision 2 (Displayed Information)**: Filename with animated spinner, status description ("Reading VCF file... Scanning index & counting records"), and live variant count progress.
+- **Auto-Dismiss & Early Dismiss**: The popup automatically closes as soon as the VCF file indexing and counting are complete. Users can also press `Escape` or click "Dismiss" to begin exploring the initial 150-variant slice immediately while background counting finishes in the header bar.
 
 ---
 
-## 1. Overview & Root Cause Analysis
+## 1. Overview & Architecture
 
-### The Problem in Current Architecture
-1. **Destructive Table Rebuilds (`clear()`)**:
-   - Currently, whenever the user scrolls past buffer margins (rows 15 or 135) or across sample boundaries, the table executes `self.fixed_table.clear(columns=True)` and `self.sample_table.clear(columns=True)`.
-   - In Textual, calling `clear()` drops all DOM nodes, resets `scroll_x` and `scroll_y` to `0`, and resets the cursor coordinate to `(0, 0)`.
-   - This causes severe visible screen flashing/flicker and repeatedly throws the cursor back to the top/initial cell.
-2. **Bidirectional Scroll Event Ping-Pong**:
-   - Two separate tables (`FixedVariantTable` and `SampleMatrixTable`) have cross-referencing `watch_scroll_y` hooks and highlight event listeners (`on_data_table_row_highlighted` / `on_data_table_cell_highlighted`).
-   - Scrolling one table triggers an event on the other, which triggers back, causing lockup and stutter.
-3. **Column Pagination Snapback**:
-   - The sample table was dynamically slicing samples into a 24-sample window. Sliding this window cleared all columns and reset `scroll_x` to 0.
-
-### The Overhaul Solution
-- **Fixed Virtual Row Pool (Zero `clear()` during scroll)**:
-  - Both tables initialize a fixed number of rows (e.g. 150 rows) once on mount.
-  - When the user scrolls past the visible window, the table updates cell text in place using `update_cell(...)` without destroying a single DOM node.
-- **Native Horizontal Column Layout**:
-  - Sample columns for the active cohort are added once during initialization.
-  - Horizontal navigation uses Textual's native column scrolling, auto-centering only when the cursor crosses viewport boundaries.
-- **Simplified Single-Authority Scroll Synchronization**:
-  - Establish a single master-slave relationship for vertical scrolling and cursor focus so events flow in one direction without circular triggers.
+### User Experience Walkthrough
+1. When the user launches VCFscape with a VCF file (`vcfscape sample.vcf.gz`), the application opens.
+2. A centered, styled modal dialog (`VcfLoadingScreen`) appears over the dimmed main UI:
+   - **Header**: "Reading VCF File" with a cyan/blue glow border matching the malaria surveillance aesthetic.
+   - **Target File**: Displays the exact file name (e.g. `malaria_pf3d7_cohort.vcf.gz`).
+   - **Animated Indicator**: A live spinner giving active visual motion.
+   - **Live Progress Metric**: Displays dynamic progress text:
+     - "Parsing header & sample metadata..."
+     - "Variants indexed: 14,200..."
+   - **Notice**: "Please wait while records are indexed..."
+   - **Action**: An optional "Continue in Background (Esc)" button allowing power users to immediately inspect the first slice.
+3. Once the background reader finishes scanning or reaches readiness, `VcfLoadingScreen` smoothly dismisses automatically, transitioning focus to the variant table.
 
 ---
 
 ## 2. Technical Architecture & Component Flow
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          VariantSplitView                              │
-│                                                                        │
-│   State Authority:                                                     │
-│   - buffer_start (global variant offset)                               │
-│   - current_row_idx (local virtual row 0..149)                         │
-│   - active_sample_idx (global sample column 0..N)                      │
-│                                                                        │
-│   ┌───────────────────────────┐      ┌─────────────────────────────┐   │
-│   │     FixedVariantTable     │  │   │      SampleMatrixTable      │   │
-│   │  (Fixed 56ch Left Table)  │  │   │   (Native Horizontal View)  │   │
-│   │                           │  │   │                             │   │
-│   │  - 150 Virtual Rows       │  │   │  - 150 Virtual Rows         │   │
-│   │  - CHROM, POS, REF, ALT.. │  │   │  - ALL Cohort Samples       │   │
-│   │  - Stable row keys        │  │   │  - Stable row/col keys      │   │
-│   └─────────────┬─────────────┘      └──────────────┬──────────────┘   │
-│                 │                                   │                  │
-│                 └───────────────┬───────────────────┘                  │
-│                                 ▼                                      │
-│                  In-Place Cell Value Updates                           │
-│             table.update_cell(row_k, col_k, new_value)                 │
-│              (Zero clear(), Zero DOM node recreation)                  │
-└─────────────────────────────────┬──────────────────────────────────────┘
-                                  ▼
-                 VcfReader (Indexed Lazy Slice Queries)
+┌────────────────────────────────────────────────────────┐
+│                   VcfscapeApp.on_mount                 │
+│                                                        │
+│  1. Mount main UI (Header, Split Table, Sidebar)       │
+│  2. If file reading / counting is in progress:         │
+│     app.push_screen(VcfLoadingScreen(...))             │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                   VcfLoadingScreen                     │
+│                                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │               Reading VCF File                   │  │
+│  │  File: malaria_pf3d7.vcf.gz                      │  │
+│  │                                                  │  │
+│  │  [ ⠋ LoadingIndicator / Animated Spinner ]       │  │
+│  │                                                  │  │
+│  │  Status: Scanning index and parsing records...   │  │
+│  │  Variants Scanned: 45,200                        │  │
+│  │                                                  │  │
+│  │  [ Continue in Background (Esc) ]                │  │
+│  └──────────────────────────────────────────────────┘  │
+└───────────────────────────┬────────────────────────────┘
+                            │
+             Auto-dismiss on readiness callback
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│             Table Ready (Focus Variant Table)          │
+└────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Detailed Implementation Steps
+## 3. Implementation Steps
 
-### Step 1: Simplify and Decouple Child Tables (`FixedVariantTable` & `SampleMatrixTable`)
-- Strip out circular watchers (`watch_scroll_y`) and aggressive mouse scroll event overrides.
-- In `SampleMatrixTable`, add all sample columns upfront during initial setup.
-- Retain edge-triggered viewport auto-centering: only adjust `scroll_x` when the active column moves outside `[scroll_x, scroll_x + viewport_width]`.
+### Step 1: Add Progress Callbacks to `VcfReader` (`src/vcfscape/core/vcf_reader.py`)
+- In `VcfReader`, add `add_progress_callback(self, cb: Callable[[int], None])`.
+- In `_count_worker`, emit progress updates every 1,000 scanned lines (or at intervals) to registered progress callbacks.
+- When counting completes, notify callbacks with the final total.
 
-### Step 2: Implement In-Place Virtual Row Buffer in `VariantSplitView`
-- Maintain a stable pool of 150 row keys (`row_0` to `row_149`).
-- When `buffer_start` shifts:
-  1. Fetch the new slice of `VariantRecord`s from `reader.get_slice(new_start, 150)`.
-  2. For each row `0..149`, update cell contents directly via `table.update_cell(row_key, col_key, new_text)`.
-  3. If fewer than 150 records remain at EOF, clear or blank the trailing virtual rows.
-  4. Adjust cursor position smoothly: `new_local_row = target_global - new_start`.
-  5. The table's scroll offset and cursor remain stable—no node unmounting, no layout recomputation, no flicker.
+### Step 2: Implement `VcfLoadingScreen` (`src/vcfscape/ui/screens/vcf_loading_screen.py`)
+- Create a `ModalScreen` subclass:
+  - Center-aligned on screen with a semi-transparent dark backdrop (`rgba(11, 15, 23, 0.85)`).
+  - Modal container with a bold cyan border, dark navy background (`#161e2e`), and clear typography.
+  - Contains `LoadingIndicator` (or animated spinner), filename label, dynamic progress counter label (`#progress_label`), and a status hint.
+  - Binds `escape` and `enter` to dismiss the modal early if desired.
+  - Public method `update_progress(count: int)` and `mark_complete(total: int)` to update the live count and close automatically.
 
-### Step 3: Streamlined Boundary Navigation (`advance_row` & `advance_sample`)
-- When reaching the buffer boundary (e.g., advancing past local row 140 or row 10):
-  - Slide `buffer_start` forward or backward by a step (e.g. 40 rows).
-  - Update rows in-place.
-  - Re-point local cursor to `target_global - buffer_start`.
-  - Maintain the visual line position (`scroll_y`) relative to the viewport.
-- For horizontal sample navigation:
-  - Cursor navigates across native columns.
-  - If cursor moves beyond visible viewport width, auto-center the active sample column in the viewport.
+### Step 3: Wire into `VcfscapeApp` (`src/vcfscape/ui/app.py`)
+- In `VcfscapeApp.on_mount()`:
+  - If `not self.reader.total_variants_ready`:
+    - Create `VcfLoadingScreen(filename=os.path.basename(self.vcf_path))`.
+    - Push screen via `self.push_screen(...)`.
+    - Hook reader progress and completion callbacks via `self.call_from_thread` to update and dismiss the modal when ready.
 
-### Step 4: Verification & Test Suite
-- Update existing scrolling unit tests in `tests/test_variant_buffer_scrolling.py`:
-  - Verify in-place update execution without table clearing.
-  - Test scrolling down through multiple 150-variant buffer windows (rows 0 -> 400).
-  - Test scrolling backward up across buffer windows (rows 400 -> 0).
-  - Test horizontal sample navigation across all columns without column truncation.
-  - Confirm chromosome contig names are never normalized or truncated.
+### Step 4: Tests & Verification
+- Add unit tests in `tests/test_vcf_loading_screen.py` verifying:
+  - `VcfLoadingScreen` initialization, layout, and styling.
+  - Progress updates via `update_progress(count)`.
+  - Auto-dismissal when completion callback triggers.
+  - Dismissal via `escape` key.
 - Run full test suite (`python3 -m unittest discover tests`).
-- Run `compile_applet` and `lint_applet` to ensure zero compilation or type regressions.
+- Run `compile_applet` and `lint_applet` to confirm zero build/lint regressions.

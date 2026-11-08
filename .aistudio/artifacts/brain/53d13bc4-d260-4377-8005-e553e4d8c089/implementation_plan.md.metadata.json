@@ -1,6 +1,6 @@
 {
-  "summary":  "Architectural overhaul plan for the Textual variant table scrolling system.\nEliminates clear() table rebuilds during buffer navigation by using in-place cell updates with a fixed virtual row pool.\nLoads all sample columns upfront for native horizontal scrolling without column rebuilds.\nMaintains the exact split visual layout (fixed variant info on left, divider, sample matrix on right) while eliminating flickering, cursor snapback, and scroll sync lockups.",
-  "updatedAt":  "2026-11-08T02:53:47.404902691Z",
+  "summary":  "Implementation plan for adding a centered modal popup loading screen with animated spinner and variant count progress when reading VCF files.\nDefines VcfLoadingScreen modal dialog in src/vcfscape/ui/screens/vcf_loading_screen.py.\nAdds real-time progress callbacks to VcfReader to stream live scanned line counts.\nIntegrates the loading popup into VcfscapeApp on mount and auto-dismisses upon readiness, with an optional Escape key to dismiss early into the initial slice.",
+  "updatedAt":  "2026-11-08T07:37:53.404977036Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

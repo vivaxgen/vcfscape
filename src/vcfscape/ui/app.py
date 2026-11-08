@@ -16,6 +16,7 @@ from vcfscape.ui.widgets.cohort_stats_pane import CohortStatsPane
 from vcfscape.ui.widgets.footer_bar import FooterBar
 from vcfscape.ui.screens.cohort_manager_screen import CohortManagerScreen
 from vcfscape.ui.screens.jump_region_screen import JumpRegionScreen
+from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen
 
 
 class VcfscapeApp(App):
@@ -52,6 +53,7 @@ class VcfscapeApp(App):
         self.reader = VcfReader(vcf_path, lazy=True)
         self.cohort_manager = CohortManager(self.reader.samples)
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
+        self.loading_screen: Optional[VcfLoadingScreen] = None
 
         # Widgets
         provisional_variants = self.reader.get_total_variants_async()
@@ -73,9 +75,25 @@ class VcfscapeApp(App):
         self.stats_pane = CohortStatsPane(self.cohort_manager)
         self.footer_bar = FooterBar()
 
-        # If counting in background, update header bar and table when ready
+        # If counting in background, hook progress and completion callbacks
         if not self.reader.total_variants_ready:
+            self.reader.add_progress_callback(self._on_progress_update)
             self.reader.add_total_variants_callback(self._on_total_variants_ready)
+
+    def on_mount(self) -> None:
+        if not self.reader.total_variants_ready:
+            self.loading_screen = VcfLoadingScreen(os.path.basename(self.vcf_path))
+            self.push_screen(self.loading_screen)
+
+    def _on_progress_update(self, count: int) -> None:
+        try:
+            self.call_from_thread(self._apply_progress_update, count)
+        except Exception:
+            pass
+
+    def _apply_progress_update(self, count: int) -> None:
+        if self.loading_screen is not None:
+            self.loading_screen.update_progress(count)
 
     def _on_total_variants_ready(self, total: int):
         try:
@@ -86,6 +104,10 @@ class VcfscapeApp(App):
     def _apply_total_variants(self, total: int):
         self.header_bar.total_variants = total
         self.table_widget.update_total_variants(total)
+        if self.loading_screen is not None:
+            self.loading_screen.mark_complete(total)
+            self.loading_screen = None
+        self.footer_bar.set_log(f"VCF file indexing complete: {total:,} total variants.")
 
     def compose(self) -> ComposeResult:
         yield self.header_bar
