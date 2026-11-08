@@ -54,6 +54,13 @@ SampleMatrixTable,
     background: #0b0f17;
 }
 
+FixedVariantTable > .datatable--hover,
+SampleMatrixTable > .datatable--hover,
+#fixed_table > .datatable--hover,
+#sample_table > .datatable--hover {
+    background: transparent;
+}
+
 SidebarPanel {
     width: 34;
     min-width: 28;

@@ -29,6 +29,16 @@ class FixedVariantTable(DataTable):
         self.split_view: Optional[Any] = None
         self._syncing_scroll: bool = False
 
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        """Disable live mouse pointer tracking over fixed variant table."""
+        event.stop()
+
+    def on_enter(self, event: events.Enter) -> None:
+        event.stop()
+
+    def on_leave(self, event: events.Leave) -> None:
+        event.stop()
+
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
         sv = getattr(self, "split_view", None)
@@ -81,6 +91,16 @@ class SampleMatrixTable(DataTable):
         super().__init__(**kwargs)
         self.peer_table: Optional[DataTable] = None
         self.split_view: Optional[Any] = None
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        """Disable live mouse pointer tracking over sample matrix table."""
+        event.stop()
+
+    def on_enter(self, event: events.Enter) -> None:
+        event.stop()
+
+    def on_leave(self, event: events.Leave) -> None:
+        event.stop()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
@@ -283,6 +303,11 @@ class VariantSplitView(Widget):
         height: 100%;
         background: #0b0f17;
     }
+
+    #fixed_table > .datatable--hover,
+    #sample_table > .datatable--hover {
+        background: transparent;
+    }
     """
 
     FIXED_WIDTHS = {
@@ -356,6 +381,10 @@ class VariantSplitView(Widget):
     def update_total_variants(self, count: int) -> None:
         """Update total variant count when background counter completes."""
         self.total_records_count = count
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        """Disable live mouse pointer tracking across split view container."""
+        event.stop()
 
     def on_master_scroll_y(self, new_value: float) -> None:
         """Master-slave vertical scroll synchronization: FixedVariantTable follows SampleMatrixTable."""
