@@ -31,11 +31,16 @@ except ImportError:
             self.scroll_y = 0
             self.scroll_x = 0
             self.max_scroll_y = 100
+            self.columns = {}
         def clear(self, columns=True):
-            pass
-        def add_column(self, *args, **kwargs):
-            pass
+            if columns:
+                self.columns = {}
+        def add_column(self, label, key=None, *args, **kwargs):
+            k = key or str(label)
+            self.columns[k] = type("Col", (), {"width": 8, "auto_width": 8})()
         def add_row(self, *args, **kwargs):
+            pass
+        def update_cell(self, row_key, column_key, value, update_width=False):
             pass
         def scroll_to(self, x=None, y=None, *args, **kwargs):
             if x is not None:
@@ -193,25 +198,23 @@ class TestVariantBufferScrolling(unittest.TestCase):
             self.assertEqual(sv.records[sv.current_row_idx].var_id, f"var_{expected_global}")
 
     def test_sample_window_advance_and_centering(self):
-        """Verify horizontal sample navigation monotonically advances without snapback."""
+        """Verify horizontal sample navigation monotonically advances without snapback across native columns."""
         samples_50 = [f"Sample_{i:03d}" for i in range(50)]
         sv = VariantSplitView(self.records[:10], samples_50, reader=None)
-        sv.sample_window_size = 20
 
         self.assertEqual(sv.current_sample_idx, 0)
-        self.assertEqual(sv.sample_window_start, 0)
+        # All columns are present in the sample table
+        self.assertEqual(len(sv.get_visible_samples()), 50)
 
-        # Step across sample boundary from 0 to 30
+        # Step across sample columns from 0 to 30
         for expected_col in range(1, 31):
             self.assertTrue(sv.can_advance_sample(forward=True))
             sv.advance_sample(forward=True)
             self.assertEqual(sv.current_sample_idx, expected_col)
-            # The active sample must be contained within the visible sample window
+            # The active sample must be contained within the sample columns
             visible = sv.get_visible_samples()
             self.assertIn(f"Sample_{expected_col:03d}", visible)
 
-        # Window start should have shifted to keep sample centered
-        self.assertGreater(sv.sample_window_start, 0)
         self.assertEqual(sv.current_sample_idx, 30)
 
         # Step back towards start
@@ -290,8 +293,64 @@ class TestVariantBufferScrolling(unittest.TestCase):
         # col_center = 20. target_x = max(0, 20 - 20) = 0.
         self.assertEqual(table.scroll_x, 0)
 
+    def test_inplace_row_updates_no_clear_during_shift(self):
+        """Verify that shifting buffer updates cells in place without calling clear() on tables."""
+        class MockReader:
+            def __init__(self, records):
+                self.all_records = records
+                self.total_variants = len(records)
+                self.total_variants_ready = True
+                self.samples = ["S1"]
+            def get_slice(self, offset, limit):
+                return self.all_records[offset: offset + limit]
+            def get_total_variants_async(self):
+                return len(self.all_records)
+
+        reader = MockReader(self.records)
+        sv = VariantSplitView(reader.get_slice(0, 150), ["S1"], reader=reader)
+
+        # Track clear() and update_cell() calls
+        fixed_clears = 0
+        sample_clears = 0
+        update_cell_calls = 0
+
+        orig_f_clear = sv.fixed_table.clear
+        orig_s_clear = sv.sample_table.clear
+        orig_update_cell = sv.fixed_table.update_cell
+
+        def f_clear_spy(*args, **kwargs):
+            nonlocal fixed_clears
+            fixed_clears += 1
+            return orig_f_clear(*args, **kwargs)
+
+        def s_clear_spy(*args, **kwargs):
+            nonlocal sample_clears
+            sample_clears += 1
+            return orig_s_clear(*args, **kwargs)
+
+        def update_cell_spy(*args, **kwargs):
+            nonlocal update_cell_calls
+            update_cell_calls += 1
+            return orig_update_cell(*args, **kwargs)
+
+        sv.fixed_table.clear = f_clear_spy
+        sv.sample_table.clear = s_clear_spy
+        sv.fixed_table.update_cell = update_cell_spy
+
+        # Trigger buffer shift forward
+        sv.set_active_row(145)
+        self.assertEqual(sv.buffer_start, 40)
+        self.assertEqual(sv.records[0].var_id, "var_40")
+
+        # Zero clear() calls must have occurred during the shift!
+        self.assertEqual(fixed_clears, 0, "fixed_table.clear() should not be called during buffer shift")
+        self.assertEqual(sample_clears, 0, "sample_table.clear() should not be called during buffer shift")
+        # In-place cell updates must have occurred!
+        self.assertGreater(update_cell_calls, 0, "Cells must be updated in place via update_cell")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

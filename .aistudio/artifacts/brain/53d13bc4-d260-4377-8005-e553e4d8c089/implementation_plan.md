@@ -1,153 +1,107 @@
-# Buffer Window Scrolling & Pointer Stability Fix
+# Textual Variant Table Scrolling Overhaul
 
-Eliminates the pointer snapback problem when scrolling past variant buffer boundaries and sample column windows in the Textual TUI, ensuring smooth genomic record pinning and auto-centered horizontal sample navigation.
+A complete overhaul and simplification of the Textual TUI variant table scrolling architecture in VCFscape. This plan eliminates the root causes of flickering, scroll lockup, and cursor resets by moving from destructive `clear(columns=True)` rebuilds to in-place virtual row updates and native horizontal scrolling across all cohort samples.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following user preferences were confirmed during clarification and govern the implementation:
+> The following architectural decisions were confirmed via interactive user clarification and govern this overhaul:
 
-- **Confirmed Decision 1 (Vertical Pointer Behavior)**: **Pin cursor to exact genomic record smoothly**. When the vertical row buffer slides forward or backward, the active cursor remains anchored to the exact same genomic locus and maintains its visual viewport position rather than snapping backwards or disorienting the user.
-- **Confirmed Decision 2 (Horizontal Sample Navigation)**: **Auto-center active sample column in viewport**. When navigating across sample columns with arrow keys, the active sample column is dynamically centered within the visible matrix viewport with zero snapback.
-
----
-
-## 1. Overview & Core Concept
-
-When navigating large genomic datasets with hundreds of thousands of variants and dozens of sample columns, `vcfscape` uses dynamic sliding windows to achieve instant startup (<15ms) and memory efficiency:
-1. **Vertical Variant Buffer Window**: A sliding slice of variants (150 rows) loaded from disk into memory.
-2. **Horizontal Sample Column Window**: A sliding subset of sample columns rendered in the matrix view.
-
-### The Problem
-Previously, when the user navigated past row ~135 or column ~23, the buffer shifted by a fixed block step (`step = 40` or `step = 8`). During the shift, the table recalculated the relative local cursor index (`new_cursor = old_cursor - step`) and cleared/rebuilt the `DataTable`. This caused:
-- The cursor to visibly jump backward by 40 rows or 8 columns on screen.
-- Textual's internal `scroll_y` and `scroll_x` to reset to 0 upon table rebuild, jarring the user viewport and sending the pointer back into previous window territory.
-
-### The Solution
-- **Global Genomic Index Tracking**: Maintain a single authoritative global variant index (`global_variant_idx`) and global sample index (`global_sample_idx`).
-- **Smooth Viewport Offset Preservation**: Before a buffer window shift, capture the visible screen viewport line of the cursor. After shifting the underlying data window, restore the cursor to the exact matching record and restore the vertical scroll position so the record stays at the exact same screen row.
-- **Auto-Centered Horizontal Sample Scrolling**: Auto-center the active sample column in the visible viewport when crossing column boundaries, providing continuous fluid navigation across high sample counts.
+- **Confirmed Decision 1 (Vertical Buffer Navigation)**: Overhaul the vertical variant buffer using **in-place row cell updates** within a stable virtual row pool, completely eliminating table clearing (`clear()`) during buffer window shifts.
+- **Confirmed Decision 2 (Horizontal Sample Navigation)**: Load **all sample columns upfront** with Textual's native horizontal scrolling, eliminating dynamic column window rebuilds, column pagination, and horizontal snapback.
+- **Visual Layout Guarantee**: The existing split-screen visual layout (left fixed columns, divider, right scrollable sample matrix, cohort statistics pane, and sidebar) remains 100% intact.
 
 ---
 
-## 2. User Experience & Visual Design
+## 1. Overview & Root Cause Analysis
 
-### Vertical Variant Navigation Flow
-```
-User presses Down Arrow / Mouse Wheel Down
-               │
-               ▼
-   Approaching Buffer Boundary (Row > 120)
-               │
-               ▼
-   Capture Viewport Anchor: screen_y_offset
-               │
-               ▼
-   Slide Buffer Window Forward (e.g. +40 rows)
-               │
-               ▼
-   Re-populate DataTable Rows (Preserving exact CHROM / POS)
-               │
-               ▼
-   Restore Cursor to Same Global Genomic Record
-   Restore Viewport Scroll Offset (Zero Jump, Zero Snapback)
-```
+### The Problem in Current Architecture
+1. **Destructive Table Rebuilds (`clear()`)**:
+   - Currently, whenever the user scrolls past buffer margins (rows 15 or 135) or across sample boundaries, the table executes `self.fixed_table.clear(columns=True)` and `self.sample_table.clear(columns=True)`.
+   - In Textual, calling `clear()` drops all DOM nodes, resets `scroll_x` and `scroll_y` to `0`, and resets the cursor coordinate to `(0, 0)`.
+   - This causes severe visible screen flashing/flicker and repeatedly throws the cursor back to the top/initial cell.
+2. **Bidirectional Scroll Event Ping-Pong**:
+   - Two separate tables (`FixedVariantTable` and `SampleMatrixTable`) have cross-referencing `watch_scroll_y` hooks and highlight event listeners (`on_data_table_row_highlighted` / `on_data_table_cell_highlighted`).
+   - Scrolling one table triggers an event on the other, which triggers back, causing lockup and stutter.
+3. **Column Pagination Snapback**:
+   - The sample table was dynamically slicing samples into a 24-sample window. Sliding this window cleared all columns and reset `scroll_x` to 0.
 
-### Horizontal Sample Column Navigation Flow
-```
-User presses Left / Right Arrow in Sample Matrix
-               │
-               ▼
-   Global Sample Index Updates: global_col_idx += 1
-               │
-               ▼
-   Check Viewport Geometry & Sample Window
-               │
-               ▼
-   Center Active Column in Viewport:
-   scroll_to(x = col_center_x - viewport_width / 2)
-               │
-               ▼
-   If outside current sample window, slide window centered on active sample
-```
-
-### Visual Stability
-- **Zero Cursor Jump**: When moving the cursor down past row 150, the pointer moves seamlessly down to row 151, 152, etc., without jumping back to row 100 or resetting the view.
-- **Unmodified Chromosome Names**: Chromosome contigs (`Pf3D7_07_v3`, `chr1`, etc.) remain completely unmodified and rendered with high-contrast cyan headers.
-- **Zebra Striping & Cell Highlights**: Row selection and genotype cell highlights stay synchronized in lockstep between the fixed table and the sample matrix.
+### The Overhaul Solution
+- **Fixed Virtual Row Pool (Zero `clear()` during scroll)**:
+  - Both tables initialize a fixed number of rows (e.g. 150 rows) once on mount.
+  - When the user scrolls past the visible window, the table updates cell text in place using `update_cell(...)` without destroying a single DOM node.
+- **Native Horizontal Column Layout**:
+  - Sample columns for the active cohort are added once during initialization.
+  - Horizontal navigation uses Textual's native column scrolling, auto-centering only when the cursor crosses viewport boundaries.
+- **Simplified Single-Authority Scroll Synchronization**:
+  - Establish a single master-slave relationship for vertical scrolling and cursor focus so events flow in one direction without circular triggers.
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
-
-### Decision 1: Record-Pinned Virtualization vs. Rebuilding from Zero
-- **Chosen Approach**: Track the absolute global record index (`global_variant_idx`), calculate its local row index in the newly shifted slice (`local_row = global_variant_idx - buffer_start`), and restore the viewport scroll offset (`scroll_to(y = target_scroll_y)`).
-- **Why**: Eliminates pointer jump while retaining lazy-loaded memory efficiency (< 10MB memory usage regardless of VCF file size).
-- **Alternative Considered**: Rebuilding the table and leaving cursor at relative index 0 or relative offset resulted in the snapback bug reported by the user.
-
-### Decision 2: Auto-Centering Sample Matrix Viewport
-- **Chosen Approach**: Calculate the horizontal column center coordinate in content pixels and scroll the viewport to center that column.
-- **Why**: Keeps the focused genotype cell prominent in the center of the screen, providing maximum surrounding sample context on both left and right sides.
-- **Alternative Considered**: Paging by fixed block increments caused the cursor to bounce between the far-left and far-right edges.
-
----
-
-## 4. Technical Architecture & Data Strategy
-
-### Component Architecture & Event Flow
+## 2. Technical Architecture & Component Flow
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                              VcfscapeApp                               │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                           HeaderBar                              │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│  ┌─────────────────────────────────┬────────────────────────────────┐  │
-│  │        VariantSplitView         │          SidebarPanel          │  │
-│  │ ┌─────────────┬───┬───────────┐ │ ┌────────────────────────────┐ │  │
-│  │ │ FixedTable  │ │ │SampleTable│ │ │ CohortListWidget           │ │  │
-│  │ │ (Info Cols) │ │ │ (Matrix)  │ │ ├────────────────────────────┤ │  │
-│  │ │             │ │ │           │ │ │ VariantSummary (Exact Contig)│ │  │
-│  │ │             │ │ │           │ │ ├────────────────────────────┤ │  │
-│  │ │             │ │ │           │ │ │ CellInspector              │ │  │
-│  │ └─────────────┴───┴───────────┘ │ └────────────────────────────┘ │  │
-│  └─────────────────────────────────┴────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                         CohortStatsPane                          │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                            FooterBar                             │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────┘
+│                          VariantSplitView                              │
+│                                                                        │
+│   State Authority:                                                     │
+│   - buffer_start (global variant offset)                               │
+│   - current_row_idx (local virtual row 0..149)                         │
+│   - active_sample_idx (global sample column 0..N)                      │
+│                                                                        │
+│   ┌───────────────────────────┐      ┌─────────────────────────────┐   │
+│   │     FixedVariantTable     │  │   │      SampleMatrixTable      │   │
+│   │  (Fixed 56ch Left Table)  │  │   │   (Native Horizontal View)  │   │
+│   │                           │  │   │                             │   │
+│   │  - 150 Virtual Rows       │  │   │  - 150 Virtual Rows         │   │
+│   │  - CHROM, POS, REF, ALT.. │  │   │  - ALL Cohort Samples       │   │
+│   │  - Stable row keys        │  │   │  - Stable row/col keys      │   │
+│   └─────────────┬─────────────┘      └──────────────┬──────────────┘   │
+│                 │                                   │                  │
+│                 └───────────────┬───────────────────┘                  │
+│                                 ▼                                      │
+│                  In-Place Cell Value Updates                           │
+│             table.update_cell(row_k, col_k, new_value)                 │
+│              (Zero clear(), Zero DOM node recreation)                  │
+└─────────────────────────────────┬──────────────────────────────────────┘
+                                  ▼
+                 VcfReader (Indexed Lazy Slice Queries)
 ```
 
-### State Variables & Windowing Math
+---
 
-```python
-# Vertical Virtual Window
-self.global_row_idx: int         # Absolute index in VCF file (e.g. 154)
-self.buffer_start: int           # Start of current slice (e.g. 40)
-self.window_size: int = 150      # Sliced rows in memory (150)
-local_row = self.global_row_idx - self.buffer_start  # Relative table row (e.g. 114)
+## 3. Detailed Implementation Steps
 
-# Horizontal Sample Window
-self.global_sample_idx: int      # Absolute sample index (e.g. 42 out of 500)
-self.sample_window_start: int    # Start of sample column slice
-self.sample_window_size: int     # Rendered sample columns
-local_col = self.global_sample_idx - self.sample_window_start
-```
+### Step 1: Simplify and Decouple Child Tables (`FixedVariantTable` & `SampleMatrixTable`)
+- Strip out circular watchers (`watch_scroll_y`) and aggressive mouse scroll event overrides.
+- In `SampleMatrixTable`, add all sample columns upfront during initial setup.
+- Retain edge-triggered viewport auto-centering: only adjust `scroll_x` when the active column moves outside `[scroll_x, scroll_x + viewport_width]`.
 
-### Detailed Execution Steps
-1. **Refactor `VariantSplitView` Pointer State**:
-   - Store `self.global_row_idx` as the ground truth for vertical navigation.
-   - Store `self.global_sample_idx` as the ground truth for horizontal sample navigation.
-2. **Implement Viewport-Preserving Buffer Shift**:
-   - In `shift_buffer()`, compute `target_local_row = target_global_row - new_start`.
-   - Calculate target viewport scroll position so the row does not jump vertically on screen.
-   - Suppress highlight events during rebuild with `_rebuilding = True` to prevent feedback loops.
-3. **Implement Auto-Centering Sample Column Navigation**:
-   - In `SampleMatrixTable.scroll_column_centered(col_idx)`, compute column midpoint and scroll to center.
-   - When cursor approaches sample window boundary, shift `sample_window_start` so the active column is centered in the sample window.
-4. **Verification & Testing**:
-   - Run unit tests in `tests/test_variant_buffer_scrolling.py` and `tests/test_tui_app.py`.
-   - Run `compile_applet` and `lint_applet` to confirm overall codebase health.
+### Step 2: Implement In-Place Virtual Row Buffer in `VariantSplitView`
+- Maintain a stable pool of 150 row keys (`row_0` to `row_149`).
+- When `buffer_start` shifts:
+  1. Fetch the new slice of `VariantRecord`s from `reader.get_slice(new_start, 150)`.
+  2. For each row `0..149`, update cell contents directly via `table.update_cell(row_key, col_key, new_text)`.
+  3. If fewer than 150 records remain at EOF, clear or blank the trailing virtual rows.
+  4. Adjust cursor position smoothly: `new_local_row = target_global - new_start`.
+  5. The table's scroll offset and cursor remain stable—no node unmounting, no layout recomputation, no flicker.
+
+### Step 3: Streamlined Boundary Navigation (`advance_row` & `advance_sample`)
+- When reaching the buffer boundary (e.g., advancing past local row 140 or row 10):
+  - Slide `buffer_start` forward or backward by a step (e.g. 40 rows).
+  - Update rows in-place.
+  - Re-point local cursor to `target_global - buffer_start`.
+  - Maintain the visual line position (`scroll_y`) relative to the viewport.
+- For horizontal sample navigation:
+  - Cursor navigates across native columns.
+  - If cursor moves beyond visible viewport width, auto-center the active sample column in the viewport.
+
+### Step 4: Verification & Test Suite
+- Update existing scrolling unit tests in `tests/test_variant_buffer_scrolling.py`:
+  - Verify in-place update execution without table clearing.
+  - Test scrolling down through multiple 150-variant buffer windows (rows 0 -> 400).
+  - Test scrolling backward up across buffer windows (rows 400 -> 0).
+  - Test horizontal sample navigation across all columns without column truncation.
+  - Confirm chromosome contig names are never normalized or truncated.
+- Run full test suite (`python3 -m unittest discover tests`).
+- Run `compile_applet` and `lint_applet` to ensure zero compilation or type regressions.
