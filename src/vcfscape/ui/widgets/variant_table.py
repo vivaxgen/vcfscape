@@ -31,6 +31,10 @@ class FixedVariantTable(DataTable):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
+        sv = getattr(self, "split_view", None)
+        if sv is not None and new_value >= getattr(self, "max_scroll_y", 0) - 15:
+            sv.fetch_more_rows(batch_size=100)
+
         peer = self.peer_table
         if peer is not None and not self._syncing_scroll and not getattr(peer, "_syncing_scroll", False):
             if abs(getattr(peer, "scroll_y", 0) - new_value) >= 1.0:
@@ -46,6 +50,9 @@ class FixedVariantTable(DataTable):
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
+        sv = getattr(self, "split_view", None)
+        if sv is not None and self.scroll_y >= getattr(self, "max_scroll_y", 0) - 15:
+            sv.fetch_more_rows(batch_size=100)
         self.scroll_down(animate=False)
         peer = self.peer_table
         if peer is not None:
@@ -53,9 +60,6 @@ class FixedVariantTable(DataTable):
                 peer.scroll_to(y=self.scroll_y, animate=False, force=True)
             except Exception:
                 pass
-        sv = getattr(self, "split_view", None)
-        if sv is not None and self.scroll_y >= self.max_scroll_y:
-            sv.request_scroll_shift(forward=True, step=25)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
@@ -66,57 +70,34 @@ class FixedVariantTable(DataTable):
                 peer.scroll_to(y=self.scroll_y, animate=False, force=True)
             except Exception:
                 pass
-        sv = getattr(self, "split_view", None)
-        if sv is not None and self.scroll_y <= 0:
-            sv.request_scroll_shift(forward=False, step=25)
 
     def action_cursor_down(self) -> None:
         sv = getattr(self, "split_view", None) or self.parent
-        while sv is not None and not hasattr(sv, "advance_row"):
+        while sv is not None and not hasattr(sv, "fetch_more_rows"):
             sv = sv.parent
 
-        old_row = self.cursor_row
-        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=True):
-            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
-                sv.advance_row(forward=True)
-                return
+        if sv is not None and hasattr(sv, "fetch_more_rows"):
+            if self.cursor_row >= self.row_count - 25:
+                sv.fetch_more_rows(batch_size=100)
 
+        old_row = self.cursor_row
         super().action_cursor_down()
-        if sv is not None:
-            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
-                sv.advance_row(forward=True)
+        if self.cursor_row == old_row and sv is not None and hasattr(sv, "fetch_more_rows"):
+            if sv.fetch_more_rows(batch_size=100):
+                super().action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        sv = getattr(self, "split_view", None) or self.parent
-        while sv is not None and not hasattr(sv, "advance_row"):
-            sv = sv.parent
-
-        old_row = self.cursor_row
-        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=False):
-            if self.cursor_row <= 0 or self.cursor_row == old_row:
-                sv.advance_row(forward=False)
-                return
-
         super().action_cursor_up()
-        if sv is not None:
-            if self.cursor_row <= 0 or self.cursor_row == old_row:
-                sv.advance_row(forward=False)
 
     def action_page_down(self) -> None:
-        old_row = self.cursor_row
-        super().action_page_down()
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "request_scroll_shift"):
-            if self.cursor_row >= self.row_count - 5 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=True, step=sv.window_size // 2)
+        if sv is not None and hasattr(sv, "fetch_more_rows"):
+            if self.cursor_row >= self.row_count - 50 or self.scroll_y >= getattr(self, "max_scroll_y", 0) - 25:
+                sv.fetch_more_rows(batch_size=100)
+        super().action_page_down()
 
     def action_page_up(self) -> None:
-        old_row = self.cursor_row
         super().action_page_up()
-        sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "request_scroll_shift"):
-            if self.cursor_row <= 5 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=False, step=sv.window_size // 2)
 
 
 class SampleMatrixTable(DataTable):
@@ -130,6 +111,10 @@ class SampleMatrixTable(DataTable):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
+        sv = getattr(self, "split_view", None)
+        if sv is not None and new_value >= getattr(self, "max_scroll_y", 0) - 15:
+            sv.fetch_more_rows(batch_size=100)
+
         peer = self.peer_table
         if peer is not None and not self._syncing_scroll and not getattr(peer, "_syncing_scroll", False):
             if abs(getattr(peer, "scroll_y", 0) - new_value) >= 1.0:
@@ -145,6 +130,9 @@ class SampleMatrixTable(DataTable):
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
+        sv = getattr(self, "split_view", None)
+        if sv is not None and self.scroll_y >= getattr(self, "max_scroll_y", 0) - 15:
+            sv.fetch_more_rows(batch_size=100)
         self.scroll_down(animate=False)
         peer = self.peer_table
         if peer is not None:
@@ -152,9 +140,6 @@ class SampleMatrixTable(DataTable):
                 peer.scroll_to(y=self.scroll_y, animate=False, force=True)
             except Exception:
                 pass
-        sv = getattr(self, "split_view", None)
-        if sv is not None and self.scroll_y >= self.max_scroll_y:
-            sv.request_scroll_shift(forward=True, step=25)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
@@ -165,9 +150,6 @@ class SampleMatrixTable(DataTable):
                 peer.scroll_to(y=self.scroll_y, animate=False, force=True)
             except Exception:
                 pass
-        sv = getattr(self, "split_view", None)
-        if sv is not None and self.scroll_y <= 0:
-            sv.request_scroll_shift(forward=False, step=25)
 
     def _get_column_bounds(self, col_idx: int) -> Tuple[int, int]:
         """Compute the horizontal range (col_left, col_right) in content coordinates."""
@@ -262,51 +244,31 @@ class SampleMatrixTable(DataTable):
 
     def action_cursor_down(self) -> None:
         sv = getattr(self, "split_view", None) or self.parent
-        while sv is not None and not hasattr(sv, "advance_row"):
+        while sv is not None and not hasattr(sv, "fetch_more_rows"):
             sv = sv.parent
 
-        old_row = self.cursor_row
-        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=True):
-            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
-                sv.advance_row(forward=True)
-                return
+        if sv is not None and hasattr(sv, "fetch_more_rows"):
+            if self.cursor_row >= self.row_count - 25:
+                sv.fetch_more_rows(batch_size=100)
 
+        old_row = self.cursor_row
         super().action_cursor_down()
-        if sv is not None:
-            if self.cursor_row >= self.row_count - 1 or self.cursor_row == old_row:
-                sv.advance_row(forward=True)
+        if self.cursor_row == old_row and sv is not None and hasattr(sv, "fetch_more_rows"):
+            if sv.fetch_more_rows(batch_size=100):
+                super().action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        sv = getattr(self, "split_view", None) or self.parent
-        while sv is not None and not hasattr(sv, "advance_row"):
-            sv = sv.parent
-
-        old_row = self.cursor_row
-        if sv is not None and hasattr(sv, "can_advance_row") and sv.can_advance_row(forward=False):
-            if self.cursor_row <= 0 or self.cursor_row == old_row:
-                sv.advance_row(forward=False)
-                return
-
         super().action_cursor_up()
-        if sv is not None:
-            if self.cursor_row <= 0 or self.cursor_row == old_row:
-                sv.advance_row(forward=False)
 
     def action_page_down(self) -> None:
-        old_row = self.cursor_row
-        super().action_page_down()
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "request_scroll_shift"):
-            if self.cursor_row >= self.row_count - 5 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=True, step=sv.window_size // 2)
+        if sv is not None and hasattr(sv, "fetch_more_rows"):
+            if self.cursor_row >= self.row_count - 50 or self.scroll_y >= getattr(self, "max_scroll_y", 0) - 25:
+                sv.fetch_more_rows(batch_size=100)
+        super().action_page_down()
 
     def action_page_up(self) -> None:
-        old_row = self.cursor_row
         super().action_page_up()
-        sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "request_scroll_shift"):
-            if self.cursor_row <= 5 or self.cursor_row == old_row:
-                sv.request_scroll_shift(forward=False, step=sv.window_size // 2)
 
 
 class VariantSplitView(Widget):
@@ -321,10 +283,11 @@ class VariantSplitView(Widget):
 
     class VariantSelected(Message):
         """Dispatched when cursor moves to a new variant row or sample cell."""
-        def __init__(self, record: VariantRecord, sample_id: Optional[str] = None):
+        def __init__(self, record: VariantRecord, sample_id: Optional[str] = None, row_index: int = 0):
             super().__init__()
             self.record = record
             self.sample_id = sample_id
+            self.row_index = row_index
 
     view_mode = reactive("normal")
     format_tag = reactive("GT")
@@ -379,7 +342,7 @@ class VariantSplitView(Widget):
     ):
         super().__init__(**kwargs)
         self.reader = reader
-        self.records = records
+        self.records = list(records)
         self.samples = samples
         self._syncing_cursor = False
         self.current_row_idx = 0
@@ -391,9 +354,10 @@ class VariantSplitView(Widget):
         self.sample_window_size = min(len(samples), self.max_sample_columns) if samples else 0
         self.sample_window_start = 0
 
-        # Virtual windowing buffer state
+        # Continuous dynamic append row state
         self.window_size = 150
         self.buffer_start = 0
+        self._is_fetching_more = False
         if self.reader:
             if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
                 self.total_records_count = self.reader.get_total_variants_async()
@@ -520,153 +484,102 @@ class VariantSplitView(Widget):
         self.sample_table.scroll_column_centered(local_col, force=force_center)
         self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
-    def can_advance_row(self, forward: bool) -> bool:
-        if not self.reader:
+    def fetch_more_rows(self, batch_size: int = 100) -> bool:
+        """Dynamically appends more rows to both tables as user scrolls down."""
+        if not self.reader or self._is_fetching_more:
             return False
-        curr_global = self.buffer_start + self.current_row_idx
+
+        current_loaded = len(self.records)
+        if self.total_records_count is not None and current_loaded >= self.total_records_count:
+            return False
+
+        self._is_fetching_more = True
+        try:
+            new_slice = self.reader.get_slice(current_loaded, batch_size)
+            if not new_slice:
+                if self.total_records_count is None:
+                    self.total_records_count = current_loaded
+                return False
+
+            cols_fixed = self._get_fixed_columns()
+            visible_samples = self.get_visible_samples()
+
+            for r in new_slice:
+                r_idx = len(self.records)
+                self.records.append(r)
+                row_key = f"row_{r_idx}"
+
+                # Fixed table row
+                cells_dict = self._get_fixed_row_cells(r)
+                row_cells_fixed = [cells_dict[f"f_{col}"] for col in cols_fixed]
+                self.fixed_table.add_row(*row_cells_fixed, key=row_key)
+
+                # Sample table row
+                row_cells_sample = []
+                for s in visible_samples:
+                    s_dict = r.sample_data.get(s, {})
+                    cell_val = str(s_dict.get(self.format_tag, "."))
+                    row_cells_sample.append(self._style_sample_cell(cell_val, self.format_tag))
+                self.sample_table.add_row(*row_cells_sample, key=row_key)
+
+            if len(new_slice) < batch_size and self.total_records_count is None:
+                self.total_records_count = len(self.records)
+
+            return True
+        finally:
+            self._is_fetching_more = False
+
+    def can_advance_row(self, forward: bool) -> bool:
         if forward:
             if self.total_records_count is not None:
-                return curr_global < self.total_records_count - 1
+                return self.current_row_idx < self.total_records_count - 1
             return True
-        return curr_global > 0
+        return self.current_row_idx > 0
 
     def advance_row(self, forward: bool) -> None:
-        """Advance cursor by 1 row across buffer window boundaries without snapback."""
-        curr_global = self.buffer_start + self.current_row_idx
+        """Advance cursor by 1 row across continuously loaded rows without snapback."""
         if forward:
-            target_global = curr_global + 1
-            if self.total_records_count is not None and target_global >= self.total_records_count:
+            target = self.current_row_idx + 1
+            if self.total_records_count is not None and target >= self.total_records_count:
                 return
+            if target >= len(self.records) - 25:
+                self.fetch_more_rows(100)
+            self.set_active_row(target)
         else:
-            target_global = max(0, curr_global - 1)
+            self.set_active_row(max(0, self.current_row_idx - 1))
 
-        self.set_active_row(target_global)
-
-    def set_active_row(self, target_global: int) -> None:
-        """Sets active variant row by global index, sliding buffer in-place when approaching edges."""
-        if target_global < 0:
+    def set_active_row(self, target_row: int) -> None:
+        """Sets active variant row, dynamically fetching rows if target is beyond loaded count."""
+        if target_row < 0:
             return
-        if self.total_records_count is not None and target_global >= self.total_records_count:
+        if self.total_records_count is not None and target_row >= self.total_records_count:
             return
 
-        local_row = target_global - self.buffer_start
-        margin = 15
-        needs_shift = (
-            local_row < margin and self.buffer_start > 0
-        ) or (
-            local_row >= len(self.records) - margin and (
-                self.total_records_count is None or (self.buffer_start + len(self.records)) < self.total_records_count
-            )
-        )
+        while len(self.records) <= target_row:
+            needed = max(100, target_row - len(self.records) + 50)
+            if not self.fetch_more_rows(needed):
+                break
 
-        if not needs_shift and 0 <= local_row < len(self.records):
-            # Target is inside current slice: move cursor directly without buffer rebuild
-            self.current_row_idx = local_row
-            self._sync_both_tables_cursor(local_row, self.current_sample_idx)
-            self._notify_selection(local_row, self.current_sample_idx)
-            return
+        if target_row >= len(self.records):
+            target_row = max(0, len(self.records) - 1)
 
-        # Calculate new buffer start
-        shift_step = 40
-        if local_row >= len(self.records) - margin:
-            new_start = self.buffer_start + shift_step
-            if self.total_records_count is not None:
-                max_start = max(0, self.total_records_count - self.window_size)
-                new_start = min(max_start, new_start)
-        else:
-            new_start = max(0, self.buffer_start - shift_step)
-
-        if new_start == self.buffer_start:
-            local_row = max(0, min(len(self.records) - 1, target_global - self.buffer_start))
-            self.current_row_idx = local_row
-            self._sync_both_tables_cursor(local_row, self.current_sample_idx)
-            self._notify_selection(local_row, self.current_sample_idx)
-            return
-
-        self._apply_buffer_slice(new_start, target_global)
+        self.current_row_idx = target_row
+        self._sync_both_tables_cursor(target_row, self.current_sample_idx)
+        self._notify_selection(target_row, self.current_sample_idx)
 
     def request_scroll_shift(self, forward: bool = True, step: int = 40) -> None:
-        """Called by child tables when cursor or scroll reaches the buffer boundary."""
-        if not self.reader or self._is_shifting or self._rebuilding:
-            return
-
-        curr_global = self.buffer_start + self.current_row_idx
+        """Backward-compatible helper: appends more rows when scrolling forward."""
         if forward:
-            target_global = curr_global + step
-            new_start = self.buffer_start + step
-            if self.total_records_count is not None:
-                max_start = max(0, self.total_records_count - self.window_size)
-                new_start = min(max_start, new_start)
-                target_global = min(self.total_records_count - 1, target_global)
-        else:
-            target_global = max(0, curr_global - step)
-            new_start = max(0, self.buffer_start - step)
-
-        if new_start != self.buffer_start:
-            self._apply_buffer_slice(new_start, target_global)
+            self.fetch_more_rows(max(100, step * 2))
 
     def shift_buffer(self, new_start: int, target_cursor_row: Optional[int] = None) -> None:
-        """Shifts live row buffer window dynamically while pinning cursor and viewport."""
-        if not self.reader or self._is_shifting or self._rebuilding:
-            return
-
-        if self.total_records_count is not None:
-            if self.total_records_count <= self.window_size:
-                return
-            new_start = max(0, min(new_start, self.total_records_count - self.window_size))
-        else:
-            new_start = max(0, new_start)
-
-        if new_start == self.buffer_start:
-            return
-
-        if target_cursor_row is not None:
-            target_global = new_start + target_cursor_row
-        else:
-            target_global = self.buffer_start + self.current_row_idx
-
-        self._apply_buffer_slice(new_start, target_global)
+        """Backward-compatible helper: ensures records are loaded up to target."""
+        target = new_start + (target_cursor_row if target_cursor_row is not None else 0)
+        self.set_active_row(target)
 
     def _apply_buffer_slice(self, new_start: int, target_global: int) -> None:
-        """Updates virtual row buffer in place without clear() or DOM node recreation."""
-        if not self.reader or self._is_shifting:
-            return
-
-        new_records = self.reader.get_slice(new_start, self.window_size)
-        if not new_records:
-            if self.total_records_count is None:
-                self.total_records_count = self.buffer_start + len(self.records)
-            return
-
-        old_scroll_y = getattr(self.fixed_table, "scroll_y", 0)
-        screen_y_offset = max(0, self.current_row_idx - old_scroll_y)
-
-        self._is_shifting = True
-        try:
-            self.buffer_start = new_start
-            self.records = new_records
-            if len(new_records) < self.window_size and self.total_records_count is None:
-                self.total_records_count = new_start + len(new_records)
-
-            # Ensure row capacity and update all row cells in place
-            self._ensure_row_capacity()
-            self._update_all_rows_in_place()
-
-            new_local_row = max(0, min(len(self.records) - 1, target_global - new_start))
-            self.current_row_idx = new_local_row
-
-            # Preserve exact visual screen line
-            target_scroll_y = max(0, new_local_row - screen_y_offset)
-            try:
-                self.fixed_table.scroll_to(y=target_scroll_y, animate=False, force=True)
-                self.sample_table.scroll_to(y=target_scroll_y, animate=False, force=True)
-            except Exception:
-                pass
-
-            self._sync_both_tables_cursor(new_local_row, self.current_sample_idx)
-            self._notify_selection(new_local_row, self.current_sample_idx)
-        finally:
-            self._is_shifting = False
+        """Backward-compatible helper: loads rows up to target_global and sets cursor."""
+        self.set_active_row(target_global)
 
     def jump_to_region(self, chrom: str, pos: int) -> bool:
         """Seek and center table directly on target genomic coordinates."""
@@ -678,18 +591,7 @@ class VariantSplitView(Widget):
             records = self.reader.query_region(chrom, max(0, pos - 100000), pos + 100000, limit=self.window_size)
 
         if records:
-            self.records = records
-            self.buffer_start = 0
-            self.current_row_idx = 0
-            self._ensure_row_capacity()
-            self._update_all_rows_in_place()
-            try:
-                self.fixed_table.scroll_to(y=0, animate=False, force=True)
-                self.sample_table.scroll_to(y=0, animate=False, force=True)
-            except Exception:
-                pass
-            self._sync_both_tables_cursor(0, self.current_sample_idx)
-            self._notify_selection(0, self.current_sample_idx)
+            self.set_records(records)
             return True
         return False
 
@@ -922,13 +824,12 @@ class VariantSplitView(Widget):
         return Text(val, style="white")
 
     def _check_buffer_boundary(self, target_row: int) -> None:
-        """Dynamically shift buffer window when cursor approaches top or bottom edge."""
-        if not self.reader or self._is_shifting or self._rebuilding:
+        """Dynamically fetch more rows when cursor approaches bottom edge."""
+        if not self.reader or self._is_fetching_more or self._rebuilding:
             return
         buffer_len = len(self.records)
-        if target_row >= buffer_len - 15 or (target_row <= 15 and self.buffer_start > 0):
-            target_global = self.buffer_start + target_row
-            self.set_active_row(target_global)
+        if target_row >= buffer_len - 25:
+            self.fetch_more_rows(100)
 
     def _check_sample_window_boundary(self, local_col: int) -> None:
         """Backward compatibility stub for horizontal sample navigation."""
@@ -936,7 +837,7 @@ class VariantSplitView(Widget):
 
     # Synchronize Cursor Movement (Arrow Up/Down, Cell Selection)
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        if self._rebuilding or self._is_shifting or self._syncing_cursor:
+        if self._rebuilding or self._is_fetching_more or self._syncing_cursor:
             return
         if event.data_table.id == "fixed_table":
             target_row = event.cursor_row
@@ -956,7 +857,7 @@ class VariantSplitView(Widget):
                 self._check_buffer_boundary(target_row)
 
     def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
-        if self._rebuilding or self._is_shifting or self._syncing_cursor:
+        if self._rebuilding or self._is_fetching_more or self._syncing_cursor:
             return
         if event.data_table.id == "sample_table":
             target_row = event.coordinate.row
@@ -989,4 +890,4 @@ class VariantSplitView(Widget):
             sample_id = None
             if 0 <= sample_col_idx < len(self.samples):
                 sample_id = self.samples[sample_col_idx]
-            self.post_message(self.VariantSelected(rec, sample_id))
+            self.post_message(self.VariantSelected(rec, sample_id, row_index=row_idx))

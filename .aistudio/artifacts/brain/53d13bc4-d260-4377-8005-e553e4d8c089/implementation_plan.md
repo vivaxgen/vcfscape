@@ -1,35 +1,91 @@
-# Big VCF Startup Acceleration & Responsive Sample Virtualization
+# Plan: Continuous Dynamic Row Appending & Fluid Vertical Scrolling
 
-A comprehensive architectural solution to eliminate the long blank startup screen and post-load UI freezing when opening large VCF files in the Textual TUI.
-
-## Status: COMPLETE (Verified & Passing)
-
-All implementation steps from the approved plan have been executed, tested, and validated.
+Eliminate the 150-row buffer boundary wall in the Textual TUI by transitioning from a rigid sliding-window to a continuous dynamic appending model that supports arrow keys, mouse wheel, and page up/down without cursor snapback or flickering.
 
 ---
 
-## 1. Summary of Changes Implemented
+## 1. Root Cause Analysis
 
-### Step 1: Instant Startup & Asynchronous Indexing (`src/vcfscape/core/indexer.py` & `src/vcfscape/core/vcf_reader.py`)
-- **Fast Header Offset Detection**: Uncompressed VCF header scanning terminates immediately at the first non-`#` line, capturing `header_end_offset` in `<2ms`.
-- **Immediate Initial Slice**: `reader.get_slice(0, 150)` seeks directly to `header_end_offset` and retrieves the first 150 records in `<5ms` without waiting for the multi-gigabyte file to finish indexing.
-- **Background Async Indexer**: Sparse index checkpointing (`SparseVcfIndex(build_async=True)`) and line counting (`_count_worker`) execute concurrently in background daemon threads, periodically streaming progress callbacks to the UI.
-- **GIL-Yielding for Fluidity**: Inserted `time.sleep(0.0005)` every 2,000 lines during chunked file scanning, allowing Textual's asyncio event loop to maintain a steady 60fps frame rate without dropped keystrokes.
+### The Flaw with the Rigid 150-Row Sliding Window
+1. **The 150-Row Wall for Mouse & PageDown**:
+   - In Textual, a `DataTable` computes `max_scroll_y = row_count - viewport_height`.
+   - With `row_count` fixed at 150, scrolling via mouse wheel or dragging the scrollbar physically halts at row 150.
+   - When code tried to detect `scroll_y >= max_scroll_y` and shift the 150-row window by resetting `scroll_y = 0`, it caused the scroll position to snap all the way back to the top of the screen.
 
-### Step 2: Immediate Loading Popup Dialog (`src/vcfscape/ui/app.py`)
-- App initialization completes in `<15ms`.
-- `on_mount()` pushes `VcfLoadingScreen` immediately so users see a centered modal dialog with an animated braille spinner, filename, and live variant count progress right away.
-- When background indexing finishes, `_apply_total_variants` updates the header bar, adjusts total table bounds, and auto-dismisses the modal. Users can also press `Esc` to dismiss and start inspecting records immediately while indexing completes in the background.
+2. **The Coordinate Snapback for Keyboard Arrow Down**:
+   - When cursor reached row 135 or 149 and shifted `buffer_start` forward by 40, code called `move_cursor(row = current_row - 40)`.
+   - Textual's internal `move_cursor` automatically invoked `scroll_to_cell`, causing the viewport to visibly jump 40 rows backward. The user felt like they were being pushed back every few keystrokes.
 
-### Step 3: Sample Column Virtualization (`src/vcfscape/ui/widgets/variant_table.py`)
-- **DOM Cell Capping**: Sample columns are virtualized to a visible viewport plus buffer window (`max_sample_columns = 50`), replacing monolithic 2,500-column DOM tables. Total cells in `DataTable` remain capped at `150 rows × 50 columns = 7,500 cells` (instead of 375,000 cells), completely eliminating UI thread freezing and latency.
-- **In-Place Window Sliding**: As users navigate horizontally towards column margins, the column window shifts with in-place cell and header updates (`update_cell`) without destroying rows or recreating widgets.
-- **Edge-Triggered Auto-Centering**: `scroll_column_centered` activates only when the cursor crosses the visible edge of the viewport.
+3. **Scrollbar Desynchronization**:
+   - The native `DataTable` scrollbar only knew about the 150 rows in the DOM, giving no indication of where the user was within a 50,000-variant file.
 
-### Step 4: Verification & Test Suite
-- Updated unit test suite in `tests/test_vcf_loading_screen.py` and `tests/test_variant_buffer_scrolling.py`:
-  - Verified sub-millisecond initial slice retrieval.
-  - Verified streaming progress callbacks from uncompressed background indexing.
-  - Verified large cohort virtualization (500+ samples) correctly caps columns at 50 in DOM and slides across the entire cohort up to sample 499 without errors.
-- **Unit Tests**: All 67 tests passed (`Ran 67 tests in 0.213s, OK`).
-- **Compilation & Linting**: `compile_applet` passed and `tsc --noEmit` passed with 0 errors.
+---
+
+## 2. Technical Overhaul Strategy
+
+### Continuous Dynamic Append ("Infinite Scroll")
+Instead of maintaining a small 150-row window that has to be slid and re-keyed, the `VariantSplitView` will continuously append variant rows dynamically as the user scrolls down:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    Initial Load: 150 Rows                  │
+│                    (Rows 0 .. 149 in DOM)                  │
+└─────────────────────────────┬──────────────────────────────┘
+                              │
+                              ▼ User scrolls / arrows near bottom (e.g. Row 120)
+┌────────────────────────────────────────────────────────────┐
+│        Dynamically Append Batch (+100 Rows: 150 .. 249)    │
+│        - Total rows become 250                             │
+│        - Cursor continues naturally (no coordinate jumps!) │
+│        - Mouse wheel continues scrolling down smoothly     │
+│        - Zero cell recreation or scroll snapping           │
+└─────────────────────────────┬──────────────────────────────┘
+                              │
+                              ▼ Continued Scrolling
+┌────────────────────────────────────────────────────────────┐
+│        Dynamically Append Batch (+100 Rows: 250 .. 349)    │
+│        - High water mark buffer (smooth up to 5,000+ rows) │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Why Continuous Append Fixes Every Issue:
+1. **Zero Snapback**: The cursor simply advances from row 148 to 149 to 150 to 151. `move_cursor` is never called with a negative offset.
+2. **No Mouse Wheel Wall**: `max_scroll_y` automatically expands as new rows are appended. The mouse wheel continues scrolling downward uninterrupted.
+3. **Fluid Page Up / Page Down**: Page Down moves through rows naturally without hitting an artificial wall.
+4. **Lightweight DOM**: Because sample columns are virtualized to 50 columns, appending 100 rows adds only `100 × 50 = 5,000` cells. Appending takes `<2ms` and consumes minimal memory.
+
+---
+
+## 3. Implementation Steps
+
+### Step 1: Continuous Append Engine in `VariantSplitView` (`src/vcfscape/ui/widgets/variant_table.py`)
+- Replace the rigid `shift_buffer` and `_check_buffer_boundary` logic with `_check_and_fetch_more(current_row_or_scroll_y)`:
+  - Trigger threshold: when `cursor_row >= self.row_count - 30` or `scroll_y >= self.max_scroll_y - 15`.
+  - Fetch chunk: calls `self.reader.get_slice(self.row_count, batch_size=100)`.
+  - Append to tables: calls `fixed_table.add_row(...)` and `sample_table.add_row(...)` for each new record.
+  - Updates `self.records.extend(new_records)` and refreshes scroll extents.
+  - No `clear()`, no in-place coordinate remapping, no snapbacks.
+
+### Step 2: Input Handlers for Keyboard, Mouse, and Page Down
+- **Arrow Down (`action_cursor_down`)**:
+  - Simply allow `super().action_cursor_down()` to advance to the next row.
+  - If cursor is near the end of loaded rows, proactively append the next batch so the cursor moves seamlessly across the boundary.
+- **Mouse Wheel (`on_mouse_scroll_down`)**:
+  - Remove the broken `self.scroll_y >= self.max_scroll_y` reset logic.
+  - When scroll reaches near bottom, trigger `_check_and_fetch_more()`, allowing mouse wheel to scroll down smoothly without interruption.
+- **Page Down (`action_page_down`)**:
+  - Check if paging down approaches the buffer end; proactively append rows before delegating to `super().action_page_down()`.
+
+### Step 3: Dataset-Wide Position Indicator
+- Update Header and Footer bars to display exact dataset position proportional to the entire file:
+  - e.g., `Variant: 1,420 / 52,400 (2.7%) [ Pf3D7_07_v3:412,500 ]`
+  - Display a visual position track in the footer: `[████░░░░░░░░░░░░░░░░]` showing relative position within the full VCF.
+  - Keep the table's native scrollbar proportional to loaded records while accurately tracking dataset progress.
+
+### Step 4: Verification
+- Test interactive vertical scrolling past rows 150, 300, 500, 1000 with:
+  - Down arrow holding past row 150 without coordinate jump.
+  - Page Down past multiple buffer batches.
+  - Mouse scroll down continuously past the initial 150 rows.
+  - Jumping to genomic locus (e.g. `Pf3D7_13_v3:1,725,259`) and appending from that locus.
+- Run complete test suite and TypeScript linting.

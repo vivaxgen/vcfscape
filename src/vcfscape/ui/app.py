@@ -130,7 +130,19 @@ class VcfscapeApp(App):
 
         sample_info = f" | Sample: {sample_id}" if sample_id else ""
         drug_note = f" [{rec.drug_annotation.drug} Resistance]" if rec.drug_annotation else ""
-        self.footer_bar.set_log(f"Locus: {rec.chrom}:{rec.pos:,} ({rec.gene}){drug_note}{sample_info}")
+
+        row_num = getattr(message, "row_index", 0) + 1
+        total = getattr(self.header_bar, "total_variants", None)
+        if total is None and hasattr(self, "table_widget") and getattr(self.table_widget, "total_records_count", None):
+            total = self.table_widget.total_records_count
+
+        if isinstance(total, int) and total > 0:
+            pct = min(100.0, (row_num / total) * 100.0)
+            pos_label = f"Variant #{row_num:,} / {total:,} ({pct:.1f}%)"
+        else:
+            pos_label = f"Variant #{row_num:,}"
+
+        self.footer_bar.set_log(f"{pos_label} │ {rec.chrom}:{rec.pos:,} ({rec.gene}){drug_note}{sample_info}")
 
     def action_set_tag_gt(self):
         self.table_widget.set_format_tag("GT")

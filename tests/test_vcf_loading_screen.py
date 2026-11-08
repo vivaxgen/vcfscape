@@ -40,7 +40,7 @@ except ImportError:
     sys.modules["textual.widget"] = MagicMock()
     sys.modules["textual.widget"].Widget = MockWidget
     sys.modules["textual.widgets"] = MagicMock()
-    sys.modules["textual.widgets.selection_list"] = MagicMock()
+    MockWidget.Pressed = type("Pressed", (), {})
     sys.modules["textual.widgets"].Static = MockWidget
     sys.modules["textual.widgets"].Button = MockWidget
     sys.modules["textual.containers"] = MagicMock()

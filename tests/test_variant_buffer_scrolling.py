@@ -1,6 +1,6 @@
 """
-Unit tests for VariantSplitView buffer windowing, total records handling,
-and scrolling down past the buffer window end.
+Unit tests for VariantSplitView continuous dynamic appending,
+total records handling, and smooth vertical scrolling past the initial buffer.
 """
 
 import sys
@@ -12,65 +12,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 try:
     import textual
     from vcfscape.ui.widgets.variant_table import VariantSplitView, FixedVariantTable, SampleMatrixTable
+    TEXTUAL_AVAILABLE = True
 except ImportError:
-    from unittest.mock import MagicMock
-
-    class MockWidget:
-        def __init__(self, *args, **kwargs):
-            self.styles = type("Styles", (), {"width": 1, "min_width": 1, "max_width": 1, "height": "100%"})()
-        def post_message(self, msg):
-            pass
-
-    class MockDataTable(MockWidget):
-        RowHighlighted = type("RowHighlighted", (), {})
-        CellHighlighted = type("CellHighlighted", (), {})
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.cursor_row = 0
-            self.row_count = 150
-            self.scroll_y = 0
-            self.scroll_x = 0
-            self.max_scroll_y = 100
-            self.columns = {}
-        def clear(self, columns=True):
-            if columns:
-                self.columns = {}
-        def add_column(self, label, key=None, *args, **kwargs):
-            k = key or str(label)
-            self.columns[k] = type("Col", (), {"width": 8, "auto_width": 8})()
-        def add_row(self, *args, **kwargs):
-            pass
-        def update_cell(self, row_key, column_key, value, update_width=False):
-            pass
-        def scroll_to(self, x=None, y=None, *args, **kwargs):
-            if x is not None:
-                self.scroll_x = x
-            if y is not None:
-                self.scroll_y = y
-        def move_cursor(self, row=None, column=None, animate=False):
-            if row is not None:
-                self.cursor_row = row
-
-    sys.modules["textual"] = MagicMock()
-    sys.modules["textual.events"] = MagicMock()
-    sys.modules["textual.widget"] = MagicMock()
-    sys.modules["textual.widget"].Widget = MockWidget
-    sys.modules["textual.widgets"] = MagicMock()
-    sys.modules["textual.widgets"].DataTable = MockDataTable
-    sys.modules["textual.widgets"].Static = MockWidget
-    sys.modules["textual.containers"] = MagicMock()
-    sys.modules["textual.reactive"] = MagicMock()
-    sys.modules["textual.reactive"].reactive = lambda x: x
-    sys.modules["textual.message"] = MagicMock()
-    sys.modules["textual.message"].Message = object
-    sys.modules["rich.text"] = MagicMock()
-    sys.modules["rich.text"].Text = lambda x, **kw: x
-
-    from vcfscape.ui.widgets.variant_table import VariantSplitView, FixedVariantTable, SampleMatrixTable
+    TEXTUAL_AVAILABLE = False
+    VariantSplitView = None
+    FixedVariantTable = None
+    SampleMatrixTable = None
 
 from vcfscape.core.vcf_reader import VariantRecord
 
 
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual library not installed in this environment")
 class TestVariantBufferScrolling(unittest.TestCase):
 
     def setUp(self):
@@ -93,7 +45,8 @@ class TestVariantBufferScrolling(unittest.TestCase):
             for i in range(500)
         ]
 
-    def test_buffer_scroll_past_window_with_total_count(self):
+    def test_buffer_continuous_append_past_window_with_total_count(self):
+        """Verify continuous dynamic append extends rows smoothly without hitting walls."""
         class MockReader:
             def __init__(self, records):
                 self.all_records = records
@@ -108,27 +61,32 @@ class TestVariantBufferScrolling(unittest.TestCase):
         reader = MockReader(self.records)
         initial_slice = reader.get_slice(0, 150)
         sv = VariantSplitView(initial_slice, ["S1"], reader=reader)
+        sv.rebuild_tables()
 
-        self.assertEqual(sv.buffer_start, 0)
         self.assertEqual(sv.total_records_count, 500)
         self.assertEqual(len(sv.records), 150)
+        self.assertEqual(sv.fixed_table.row_count, 150)
+        self.assertEqual(sv.sample_table.row_count, 150)
 
-        # Trigger boundary check at bottom of initial 150-variant window
+        # Trigger boundary check at bottom of initial 150-variant window (row 140)
         sv._check_buffer_boundary(140)
-        self.assertEqual(sv.buffer_start, 40)
-        self.assertEqual(len(sv.records), 150)
+        # Should dynamically append 100 more rows: 150 -> 250
+        self.assertEqual(len(sv.records), 250)
+        self.assertEqual(sv.fixed_table.row_count, 250)
+        self.assertEqual(sv.sample_table.row_count, 250)
 
-        # Shift multiple steps past initial window (40 -> 80 -> 120 -> 160 -> 200)
-        for _ in range(4):
-            sv._check_buffer_boundary(140)
-        self.assertGreater(sv.buffer_start, 150)
-        self.assertEqual(sv.buffer_start, 200)
+        # Trigger boundary check at bottom of 250 (row 235)
+        sv._check_buffer_boundary(235)
+        self.assertEqual(len(sv.records), 350)
+        self.assertEqual(sv.fixed_table.row_count, 350)
 
-        # Shift until file end (max_start = 500 - 150 = 350)
+        # Continuous append until file end (500 records)
         sv.request_scroll_shift(forward=True, step=200)
-        self.assertEqual(sv.buffer_start, 350)
+        self.assertEqual(len(sv.records), 500)
+        self.assertEqual(sv.fixed_table.row_count, 500)
 
-    def test_buffer_scroll_with_async_background_counting(self):
+    def test_continuous_append_with_async_background_counting(self):
+        """Verify dynamic appending works even before background variant counting finishes."""
         class AsyncCountingReader:
             def __init__(self, records):
                 self.all_records = records
@@ -142,21 +100,22 @@ class TestVariantBufferScrolling(unittest.TestCase):
         reader = AsyncCountingReader(self.records)
         initial_slice = reader.get_slice(0, 150)
         sv = VariantSplitView(initial_slice, ["S1"], reader=reader)
+        sv.rebuild_tables()
 
-        # total_records_count must be None and not capped to len(records)
         self.assertIsNone(sv.total_records_count)
+        self.assertEqual(len(sv.records), 150)
 
-        # Must shift forward past 150 even while background counting is active
-        sv.request_scroll_shift(forward=True, step=40)
-        self.assertEqual(sv.buffer_start, 40)
-        sv.request_scroll_shift(forward=True, step=40)
-        self.assertEqual(sv.buffer_start, 80)
-        sv.request_scroll_shift(forward=True, step=80)
-        self.assertEqual(sv.buffer_start, 160)
-        self.assertGreater(sv.buffer_start, 150)
+        # Append more rows while background counting is active
+        sv.request_scroll_shift(forward=True, step=100)
+        self.assertEqual(len(sv.records), 350)
+        self.assertEqual(sv.fixed_table.row_count, 350)
 
-    def test_advance_row_smooth_pinning_across_buffer_boundary(self):
-        """Verify advancing row by row across window boundary (row 130 -> 160) keeps cursor pinned."""
+        # Background counting completes
+        sv.update_total_variants(500)
+        self.assertEqual(sv.total_records_count, 500)
+
+    def test_advance_row_monotonic_across_boundary(self):
+        """Verify advancing row by row across window boundary (row 130 -> 160) keeps cursor advancing without snapback."""
         class MockReader:
             def __init__(self, records):
                 self.all_records = records
@@ -171,39 +130,38 @@ class TestVariantBufferScrolling(unittest.TestCase):
         reader = MockReader(self.records)
         initial_slice = reader.get_slice(0, 150)
         sv = VariantSplitView(initial_slice, ["S1"], reader=reader)
+        sv.rebuild_tables()
 
         # Set cursor to row 130
         sv.set_active_row(130)
-        self.assertEqual(sv.current_row_idx + sv.buffer_start, 130)
+        self.assertEqual(sv.current_row_idx, 130)
         self.assertEqual(sv.records[sv.current_row_idx].var_id, "var_130")
 
         # Step one-by-one from 130 to 160
         for expected_global in range(131, 161):
             self.assertTrue(sv.can_advance_row(forward=True))
             sv.advance_row(forward=True)
-            active_global = sv.current_row_idx + sv.buffer_start
-            self.assertEqual(active_global, expected_global)
+            self.assertEqual(sv.current_row_idx, expected_global)
             self.assertEqual(sv.records[sv.current_row_idx].var_id, f"var_{expected_global}")
 
-        # Buffer should have shifted forward smoothly
-        self.assertGreater(sv.buffer_start, 0)
+        # Check table has grown to accommodate row 160
+        self.assertGreaterEqual(len(sv.records), 250)
         self.assertEqual(sv.records[sv.current_row_idx].var_id, "var_160")
 
         # Now step backward from 160 to 120
         for expected_global in range(159, 119, -1):
             self.assertTrue(sv.can_advance_row(forward=False))
             sv.advance_row(forward=False)
-            active_global = sv.current_row_idx + sv.buffer_start
-            self.assertEqual(active_global, expected_global)
+            self.assertEqual(sv.current_row_idx, expected_global)
             self.assertEqual(sv.records[sv.current_row_idx].var_id, f"var_{expected_global}")
 
     def test_sample_window_advance_and_centering(self):
         """Verify horizontal sample navigation monotonically advances without snapback across native columns."""
         samples_50 = [f"Sample_{i:03d}" for i in range(50)]
         sv = VariantSplitView(self.records[:10], samples_50, reader=None)
+        sv.rebuild_tables()
 
         self.assertEqual(sv.current_sample_idx, 0)
-        # All columns are present in the sample table
         self.assertEqual(len(sv.get_visible_samples()), 50)
 
         # Step across sample columns from 0 to 30
@@ -211,7 +169,6 @@ class TestVariantBufferScrolling(unittest.TestCase):
             self.assertTrue(sv.can_advance_sample(forward=True))
             sv.advance_sample(forward=True)
             self.assertEqual(sv.current_sample_idx, expected_col)
-            # The active sample must be contained within the sample columns
             visible = sv.get_visible_samples()
             self.assertIn(f"Sample_{expected_col:03d}", visible)
 
@@ -264,37 +221,30 @@ class TestVariantBufferScrolling(unittest.TestCase):
         self.assertTrue(table.is_column_in_viewport(1))
         self.assertTrue(table.is_column_in_viewport(2))
         self.assertTrue(table.is_column_in_viewport(3))
-        self.assertTrue(table.is_column_in_viewport(4))  # Col 4 bounds: 32..40, fully in [0..40]
-        self.assertFalse(table.is_column_in_viewport(5)) # Col 5 bounds: 40..48, passes right edge
+        self.assertTrue(table.is_column_in_viewport(4))
+        self.assertFalse(table.is_column_in_viewport(5))
 
-        # Moving within viewport: col 0 -> col 1 -> col 2 -> col 3 -> col 4
-        # scroll_x MUST stay at 0 (no auto-centering)
         for col in range(1, 5):
             table.scroll_column_centered(col)
             self.assertEqual(table.scroll_x, 0, f"Column {col} is inside viewport, scroll_x should not change")
 
-        # Now pointer passes the right edge: moving to col 5 (bounds 40..48)
+        # Now pointer passes the right edge: moving to col 5
         table.scroll_column_centered(5)
-        # It must auto-center col 5:
-        # col_center = (40 + 48) // 2 = 44. target_x = max(0, 44 - 20) = 24.
         self.assertEqual(table.scroll_x, 24)
 
-        # Now within new viewport [24..64]: col 5 (40..48) and col 6 (48..56) are inside
+        # Now within new viewport [24..64]: col 5 and col 6 are inside
         self.assertTrue(table.is_column_in_viewport(5))
         self.assertTrue(table.is_column_in_viewport(6))
         table.scroll_column_centered(6)
-        # Should NOT change scroll_x:
         self.assertEqual(table.scroll_x, 24)
 
-        # Moving backward: col 2 (16..24) passes left edge of viewport [24..64]
+        # Moving backward: col 2 passes left edge of viewport [24..64]
         self.assertFalse(table.is_column_in_viewport(2))
         table.scroll_column_centered(2)
-        # Auto-centers col 2:
-        # col_center = 20. target_x = max(0, 20 - 20) = 0.
         self.assertEqual(table.scroll_x, 0)
 
-    def test_inplace_row_updates_no_clear_during_shift(self):
-        """Verify that shifting buffer updates cells in place without calling clear() on tables."""
+    def test_continuous_append_no_table_clear(self):
+        """Verify that dynamic appending adds rows without clearing existing table columns or rows."""
         class MockReader:
             def __init__(self, records):
                 self.all_records = records
@@ -308,15 +258,13 @@ class TestVariantBufferScrolling(unittest.TestCase):
 
         reader = MockReader(self.records)
         sv = VariantSplitView(reader.get_slice(0, 150), ["S1"], reader=reader)
+        sv.rebuild_tables()
 
-        # Track clear() and update_cell() calls
         fixed_clears = 0
         sample_clears = 0
-        update_cell_calls = 0
 
         orig_f_clear = sv.fixed_table.clear
         orig_s_clear = sv.sample_table.clear
-        orig_update_cell = sv.fixed_table.update_cell
 
         def f_clear_spy(*args, **kwargs):
             nonlocal fixed_clears
@@ -328,30 +276,24 @@ class TestVariantBufferScrolling(unittest.TestCase):
             sample_clears += 1
             return orig_s_clear(*args, **kwargs)
 
-        def update_cell_spy(*args, **kwargs):
-            nonlocal update_cell_calls
-            update_cell_calls += 1
-            return orig_update_cell(*args, **kwargs)
-
         sv.fixed_table.clear = f_clear_spy
         sv.sample_table.clear = s_clear_spy
-        sv.fixed_table.update_cell = update_cell_spy
 
-        # Trigger buffer shift forward
+        # Trigger dynamic continuous append
         sv.set_active_row(145)
-        self.assertEqual(sv.buffer_start, 40)
-        self.assertEqual(sv.records[0].var_id, "var_40")
+        self.assertEqual(len(sv.records), 250)
+        self.assertEqual(sv.records[0].var_id, "var_0")
+        self.assertEqual(sv.records[249].var_id, "var_249")
 
-        # Zero clear() calls must have occurred during the shift!
-        self.assertEqual(fixed_clears, 0, "fixed_table.clear() should not be called during buffer shift")
-        self.assertEqual(sample_clears, 0, "sample_table.clear() should not be called during buffer shift")
-        # In-place cell updates must have occurred!
-        self.assertGreater(update_cell_calls, 0, "Cells must be updated in place via update_cell")
+        # Zero clear() calls must occur during dynamic row appending!
+        self.assertEqual(fixed_clears, 0, "fixed_table.clear() should not be called during row append")
+        self.assertEqual(sample_clears, 0, "sample_table.clear() should not be called during row append")
 
     def test_large_cohort_sample_column_virtualization(self):
         """Verify cohorts with 500+ samples virtualize columns to 50 in DOM and navigate smoothly."""
         cohort_500 = [f"Sample_{i:04d}" for i in range(500)]
         sv = VariantSplitView(self.records[:10], cohort_500, reader=None)
+        sv.rebuild_tables()
 
         # Capped at 50 columns in the DOM instead of 500
         self.assertEqual(len(sv.get_visible_samples()), 50)
@@ -393,6 +335,3 @@ class TestVariantBufferScrolling(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
