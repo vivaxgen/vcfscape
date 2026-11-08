@@ -7,6 +7,7 @@ Supports instant startup (< 50ms), lazy chunked fetching, LRU caching, and regio
 
 import os
 import gzip
+import time
 import threading
 from typing import List, Dict, Any, Optional, Tuple, Iterator, Callable
 
@@ -219,8 +220,20 @@ class VcfReader:
 
         # 2. Setup Indexing Engine
         if not self.is_gzipped:
-            self._sparse_index = SparseVcfIndex(self.filepath)
-            self._total_variants_count = self._sparse_index.total_records
+            if lazy:
+                self._sparse_index = SparseVcfIndex(
+                    self.filepath,
+                    build_async=True,
+                    on_progress=self._on_sparse_progress,
+                    on_complete=self._on_sparse_complete,
+                )
+                if self._sparse_index.is_ready:
+                    self._total_variants_count = self._sparse_index.total_records
+                else:
+                    self._total_variants_count = None
+            else:
+                self._sparse_index = SparseVcfIndex(self.filepath, build_async=False)
+                self._total_variants_count = self._sparse_index.total_records
         else:
             self._setup_gzipped_source()
 
@@ -257,6 +270,26 @@ class VcfReader:
                         self.samples = parts[9:]
                     break
 
+    def _on_sparse_progress(self, count: int) -> None:
+        for pcb in list(self._progress_callbacks):
+            try:
+                pcb(count)
+            except Exception:
+                pass
+
+    def _on_sparse_complete(self, total: int) -> None:
+        self._total_variants_count = total
+        for pcb in list(self._progress_callbacks):
+            try:
+                pcb(total)
+            except Exception:
+                pass
+        for cb in list(self._count_callbacks):
+            try:
+                cb(total)
+            except Exception:
+                pass
+
     def _setup_gzipped_source(self):
         """Prepares cyvcf2 and starts asynchronous background line counting."""
         has_tabix = os.path.exists(f"{self.filepath}.tbi") or os.path.exists(f"{self.filepath}.csi")
@@ -289,6 +322,8 @@ class VcfReader:
                                         pcb(count)
                                     except Exception:
                                         pass
+                            if count % 2000 == 0:
+                                time.sleep(0.0005)
                 self._total_variants_count = count
                 for pcb in list(self._progress_callbacks):
                     try:
@@ -347,6 +382,8 @@ class VcfReader:
         if self._records:
             return len(self._records)
         if self._sparse_index:
+            if not self._sparse_index.is_ready:
+                self._sparse_index.wait_until_ready()
             self._total_variants_count = self._sparse_index.total_records
             return self._total_variants_count
 

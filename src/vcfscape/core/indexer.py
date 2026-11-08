@@ -12,8 +12,10 @@ import io
 import gzip
 import json
 import bisect
+import time
+import threading
 from collections import OrderedDict
-from typing import List, Dict, Any, Optional, Tuple, Iterator
+from typing import List, Dict, Any, Optional, Tuple, Iterator, Callable
 
 from vcfscape.core.malaria_db import MalariaAnnotationDB, MarkerAnnotation
 
@@ -52,15 +54,28 @@ class SparseVcfIndex:
     Sparse byte-offset index for fast seeking into uncompressed VCF files.
     Checkpoints the file byte offset every N variants (default: 200).
     Allows instant jump to any variant index or genomic coordinate.
+    Supports asynchronous background indexing to prevent blocking startup.
     """
 
-    def __init__(self, filepath: str, step: int = 200):
+    def __init__(
+        self,
+        filepath: str,
+        step: int = 200,
+        build_async: bool = False,
+        on_progress: Optional[Callable[[int], None]] = None,
+        on_complete: Optional[Callable[[int], None]] = None,
+    ):
         self.filepath = filepath
         self.step = step
+        self.build_async = build_async
+        self.on_progress = on_progress
+        self.on_complete = on_complete
         self.header_end_offset: int = 0
         self.total_records: int = 0
         self.checkpoints: List[SparseIndexEntry] = []
         self.chrom_positions: Dict[str, List[Tuple[int, int]]] = {}  # chrom -> [(pos, index), ...]
+        self.is_ready: bool = False
+        self._worker_thread: Optional[threading.Thread] = None
 
         self._load_or_build()
 
@@ -90,6 +105,20 @@ class SparseVcfIndex:
             return paths[0]
         return paths[-1] if len(paths) > 1 else paths[0]
 
+    def _find_header_end_offset(self) -> int:
+        """Quickly scans header to find byte offset where variant records start (<2ms)."""
+        offset = 0
+        with open(self.filepath, "rb") as f:
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                if line.startswith(b"#"):
+                    offset = f.tell()
+                    continue
+                break
+        return offset
+
     def _load_or_build(self):
         file_mtime = os.path.getmtime(self.filepath)
         file_size = os.path.getsize(self.filepath)
@@ -106,12 +135,51 @@ class SparseVcfIndex:
                             self.step = data["step"]
                             self.checkpoints = [SparseIndexEntry.from_dict(d) for d in data["checkpoints"]]
                             self._build_chrom_lookup()
+                            self.is_ready = True
+                            if self.on_complete:
+                                try:
+                                    self.on_complete(self.total_records)
+                                except Exception:
+                                    pass
                             return
                 except Exception:
                     pass  # Try next or rebuild
 
-        self._build_index()
-        self._save_index(self._index_cache_path())
+        # Header end offset can be located immediately in <2ms
+        self.header_end_offset = self._find_header_end_offset()
+
+        if self.build_async:
+            self._start_async_build()
+        else:
+            self._build_index()
+            self._save_index(self._index_cache_path())
+            self.is_ready = True
+            if self.on_complete:
+                try:
+                    self.on_complete(self.total_records)
+                except Exception:
+                    pass
+
+    def _start_async_build(self):
+        def _worker():
+            try:
+                self._build_index(async_mode=True)
+                self._save_index(self._index_cache_path())
+                self.is_ready = True
+                if self.on_complete:
+                    try:
+                        self.on_complete(self.total_records)
+                    except Exception:
+                        pass
+            except Exception:
+                self.is_ready = True
+
+        self._worker_thread = threading.Thread(target=_worker, daemon=True)
+        self._worker_thread.start()
+
+    def wait_until_ready(self, timeout: Optional[float] = None) -> None:
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout)
 
     def _build_chrom_lookup(self):
         self.chrom_positions.clear()
@@ -120,7 +188,7 @@ class SparseVcfIndex:
                 self.chrom_positions[cp.chrom] = []
             self.chrom_positions[cp.chrom].append((cp.pos, cp.index))
 
-    def _build_index(self):
+    def _build_index(self, async_mode: bool = False):
         """Scans uncompressed VCF using high-speed 4MB chunked streaming buffer."""
         self.checkpoints = []
         self.total_records = 0
@@ -174,6 +242,14 @@ class SparseVcfIndex:
                             )
                     curr_offset += len(line) + 1
                     record_idx += 1
+                    if async_mode:
+                        if record_idx % 1000 == 0 and self.on_progress:
+                            try:
+                                self.on_progress(record_idx)
+                            except Exception:
+                                pass
+                        if record_idx % 2000 == 0:
+                            time.sleep(0.0005)
 
             if carry and carry.strip():
                 if record_idx % self.step == 0:
@@ -224,7 +300,9 @@ class SparseVcfIndex:
         # Binary search for greatest checkpoint <= target_idx
         idx_keys = [cp.index for cp in self.checkpoints]
         pos = bisect.bisect_right(idx_keys, target_idx) - 1
-        pos = max(0, min(pos, len(self.checkpoints) - 1))
+        if pos < 0:
+            return self.header_end_offset, 0
+        pos = min(pos, len(self.checkpoints) - 1)
         cp = self.checkpoints[pos]
         return cp.offset, cp.index
 

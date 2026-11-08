@@ -348,6 +348,48 @@ class TestVariantBufferScrolling(unittest.TestCase):
         # In-place cell updates must have occurred!
         self.assertGreater(update_cell_calls, 0, "Cells must be updated in place via update_cell")
 
+    def test_large_cohort_sample_column_virtualization(self):
+        """Verify cohorts with 500+ samples virtualize columns to 50 in DOM and navigate smoothly."""
+        cohort_500 = [f"Sample_{i:04d}" for i in range(500)]
+        sv = VariantSplitView(self.records[:10], cohort_500, reader=None)
+
+        # Capped at 50 columns in the DOM instead of 500
+        self.assertEqual(len(sv.get_visible_samples()), 50)
+        self.assertEqual(sv.sample_window_start, 0)
+        self.assertEqual(sv.current_sample_idx, 0)
+        self.assertEqual(sv.get_visible_samples()[0], "Sample_0000")
+        self.assertEqual(sv.get_visible_samples()[-1], "Sample_0049")
+
+        # Step horizontally into boundary margin (e.g. sample 46)
+        sv.set_active_sample(46)
+        self.assertEqual(sv.current_sample_idx, 46)
+        self.assertGreater(sv.sample_window_start, 0)
+        self.assertEqual(len(sv.get_visible_samples()), 50)
+        self.assertIn("Sample_0046", sv.get_visible_samples())
+
+        # Jump to sample 250 in large cohort
+        sv.set_active_sample(250)
+        self.assertEqual(sv.current_sample_idx, 250)
+        visible = sv.get_visible_samples()
+        self.assertEqual(len(visible), 50)
+        self.assertIn("Sample_0250", visible)
+
+        # Jump towards cohort end (sample 499)
+        sv.set_active_sample(499)
+        self.assertEqual(sv.current_sample_idx, 499)
+        visible = sv.get_visible_samples()
+        self.assertEqual(len(visible), 50)
+        self.assertIn("Sample_0499", visible)
+        self.assertEqual(sv.sample_window_start, 450)
+
+        # Jump back to start
+        sv.set_active_sample(5)
+        self.assertEqual(sv.current_sample_idx, 5)
+        visible = sv.get_visible_samples()
+        self.assertEqual(len(visible), 50)
+        self.assertIn("Sample_0005", visible)
+        self.assertEqual(sv.sample_window_start, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

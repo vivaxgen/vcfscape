@@ -106,6 +106,42 @@ class TestVcfLoadingScreen(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_async_uncompressed_vcf_indexing_progress(self):
+        """Verify uncompressed VCF starts immediately and streams progress callbacks."""
+        from vcfscape.core.vcf_reader import VcfReader
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".vcf", delete=False) as f:
+            f.write("##fileformat=VCFv4.2\n")
+            f.write("##contig=<ID=Pf3D7_07_v3,length=1445207>\n")
+            f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n")
+            for i in range(2500):
+                f.write(f"Pf3D7_07_v3\t{1000 + i * 5}\tvar_{i}\tA\tT\t99\tPASS\t.\tGT\t0/1\n")
+            temp_path = f.name
+
+        try:
+            reader = VcfReader(temp_path, lazy=True)
+            # Immediate slice retrieval should succeed instantly
+            init_slice = reader.get_slice(0, 10)
+            self.assertEqual(len(init_slice), 10)
+            self.assertEqual(init_slice[0].var_id, "var_0")
+
+            progress_counts = []
+            reader.add_progress_callback(lambda count: progress_counts.append(count))
+
+            # Total variants waits for background worker to complete
+            total = reader.total_variants
+            self.assertEqual(total, 2500)
+            self.assertTrue(reader.total_variants_ready)
+            self.assertTrue(len(progress_counts) > 0)
+            self.assertEqual(progress_counts[-1], 2500)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            idx_cache = os.path.join(os.path.dirname(temp_path), f".{os.path.basename(temp_path)}.vcfscape.idx")
+            if os.path.exists(idx_cache):
+                os.remove(idx_cache)
+
 
 if __name__ == "__main__":
     unittest.main()

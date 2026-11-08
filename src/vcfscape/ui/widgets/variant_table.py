@@ -386,8 +386,9 @@ class VariantSplitView(Widget):
         self.current_sample_idx = 0
         self._last_notified: Optional[Tuple[int, int]] = None
 
-        # Backward compatibility properties for sample windowing
-        self.sample_window_size = len(samples) if samples else 25
+        # Sample column virtualization state: visible viewport + buffer window
+        self.max_sample_columns = 50
+        self.sample_window_size = min(len(samples), self.max_sample_columns) if samples else 0
         self.sample_window_start = 0
 
         # Virtual windowing buffer state
@@ -442,7 +443,8 @@ class VariantSplitView(Widget):
                 pass
 
             try:
-                self.sample_table.move_cursor(row=row, column=col, animate=False)
+                local_col = max(0, min(self.sample_window_size - 1, col - self.sample_window_start))
+                self.sample_table.move_cursor(row=row, column=local_col, animate=False)
             except Exception:
                 pass
         finally:
@@ -469,17 +471,53 @@ class VariantSplitView(Widget):
         self.set_active_sample(target)
 
     def set_active_sample(self, global_col: int, force_center: bool = False) -> None:
-        """Sets active sample column across native cohort sample columns."""
+        """Sets active sample column across virtualized cohort sample columns."""
         if not self.samples:
             return
         global_col = max(0, min(len(self.samples) - 1, global_col))
         self.current_sample_idx = global_col
 
+        # Check if horizontal sample window needs to slide
+        if len(self.samples) > self.sample_window_size:
+            local_col = global_col - self.sample_window_start
+            margin = 6
+            new_start = self.sample_window_start
+            if local_col < margin and self.sample_window_start > 0:
+                new_start = max(0, global_col - margin)
+            elif (
+                local_col >= self.sample_window_size - margin
+                and self.sample_window_start + self.sample_window_size < len(self.samples)
+            ):
+                new_start = min(
+                    len(self.samples) - self.sample_window_size,
+                    global_col - self.sample_window_size + margin + 1,
+                )
+
+            if new_start != self.sample_window_start:
+                self.sample_window_start = new_start
+                # Update column labels in place
+                visible = self.get_visible_samples()
+                for j, s in enumerate(visible):
+                    col_k = f"col_{j}"
+                    if hasattr(self.sample_table, "columns") and col_k in self.sample_table.columns:
+                        try:
+                            self.sample_table.columns[col_k].label = Text(s, style="bold bright_white")
+                        except Exception:
+                            pass
+                # Update row cells in place without clearing
+                for r_idx, r in enumerate(self.records):
+                    self._update_sample_row_cells(f"row_{r_idx}", r)
+                try:
+                    self.sample_table.refresh()
+                except Exception:
+                    pass
+
+        local_col = max(0, min(self.sample_window_size - 1, global_col - self.sample_window_start))
         try:
-            self.sample_table.move_cursor(row=self.current_row_idx, column=global_col, animate=False)
+            self.sample_table.move_cursor(row=self.current_row_idx, column=local_col, animate=False)
         except Exception:
             pass
-        self.sample_table.scroll_column_centered(global_col, force=force_center)
+        self.sample_table.scroll_column_centered(local_col, force=force_center)
         self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
     def can_advance_row(self, forward: bool) -> bool:
@@ -767,8 +805,9 @@ class VariantSplitView(Widget):
                 pass
 
     def _update_sample_row_cells(self, row_key: str, r: VariantRecord) -> None:
-        for s in self.samples:
-            col_k = f"s_{s}"
+        visible = self.get_visible_samples()
+        for j, s in enumerate(visible):
+            col_k = f"col_{j}"
             s_dict = r.sample_data.get(s, {})
             raw_val = str(s_dict.get(self.format_tag, "."))
             styled = self._style_sample_cell(raw_val, self.format_tag)
@@ -782,10 +821,11 @@ class VariantSplitView(Widget):
         fixed_count = getattr(self.fixed_table, "row_count", 0)
         if fixed_count < needed:
             cols_fixed = self._get_fixed_columns()
+            visible_count = len(self.get_visible_samples())
             for r_idx in range(fixed_count, needed):
                 row_key = f"row_{r_idx}"
                 self.fixed_table.add_row(*([""] * len(cols_fixed)), key=row_key)
-                self.sample_table.add_row(*([""] * len(self.samples)), key=row_key)
+                self.sample_table.add_row(*([""] * visible_count), key=row_key)
 
     def _update_all_rows_in_place(self) -> None:
         """Updates cell contents for all current records in place using update_cell."""
@@ -798,6 +838,7 @@ class VariantSplitView(Widget):
         fixed_count = getattr(self.fixed_table, "row_count", 0)
         if fixed_count > len(self.records):
             cols_fixed = self._get_fixed_columns()
+            visible_count = len(self.get_visible_samples())
             for r_idx in range(len(self.records), fixed_count):
                 row_key = f"row_{r_idx}"
                 for col_name in cols_fixed:
@@ -805,9 +846,9 @@ class VariantSplitView(Widget):
                         self.fixed_table.update_cell(row_key, f"f_{col_name}", "")
                     except Exception:
                         pass
-                for s in self.samples:
+                for j in range(visible_count):
                     try:
-                        self.sample_table.update_cell(row_key, f"s_{s}", Text(""))
+                        self.sample_table.update_cell(row_key, f"col_{j}", Text(""))
                     except Exception:
                         pass
 
@@ -828,18 +869,18 @@ class VariantSplitView(Widget):
             self.fixed_table.add_row(*row_cells, key=f"row_{r_idx}")
 
     def get_visible_samples(self) -> List[str]:
-        return self.samples
+        return self.samples[self.sample_window_start : self.sample_window_start + self.sample_window_size]
 
     def rebuild_sample_table(self):
-        """Constructs right horizontally scrollable sample columns across all cohort samples."""
+        """Constructs right horizontally scrollable sample columns across visible window."""
         self.sample_table.clear(columns=True)
-
-        for s in self.samples:
-            self.sample_table.add_column(Text(s, style="bold bright_white"), key=f"s_{s}")
+        visible = self.get_visible_samples()
+        for j, s in enumerate(visible):
+            self.sample_table.add_column(Text(s, style="bold bright_white"), key=f"col_{j}")
 
         for r_idx, r in enumerate(self.records):
             row_cells = []
-            for s in self.samples:
+            for s in visible:
                 s_dict = r.sample_data.get(s, {})
                 cell_val = str(s_dict.get(self.format_tag, "."))
                 row_cells.append(self._style_sample_cell(cell_val, self.format_tag))
@@ -902,7 +943,8 @@ class VariantSplitView(Widget):
             if self.sample_table.cursor_row != target_row:
                 self._syncing_cursor = True
                 try:
-                    self.sample_table.move_cursor(row=target_row, column=self.current_sample_idx, animate=False)
+                    local_col = max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start))
+                    self.sample_table.move_cursor(row=target_row, column=local_col, animate=False)
                 except Exception:
                     pass
                 finally:
@@ -918,7 +960,8 @@ class VariantSplitView(Widget):
             return
         if event.data_table.id == "sample_table":
             target_row = event.coordinate.row
-            target_col = event.coordinate.column
+            local_col = event.coordinate.column
+            global_col = self.sample_window_start + local_col
 
             if self.fixed_table.cursor_row != target_row:
                 self._syncing_cursor = True
@@ -929,10 +972,10 @@ class VariantSplitView(Widget):
                 finally:
                     self._syncing_cursor = False
 
-            if self.current_row_idx != target_row or self.current_sample_idx != target_col:
+            if self.current_row_idx != target_row or self.current_sample_idx != global_col:
                 self.current_row_idx = target_row
-                self.current_sample_idx = target_col
-                self.sample_table.scroll_column_centered(target_col, force=False)
+                self.current_sample_idx = global_col
+                self.sample_table.scroll_column_centered(local_col, force=False)
                 self._notify_selection(self.current_row_idx, self.current_sample_idx)
                 self._check_buffer_boundary(target_row)
 
