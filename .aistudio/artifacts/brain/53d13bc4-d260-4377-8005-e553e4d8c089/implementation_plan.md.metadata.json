@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for resolving vertical scrolling past the view buffer in Textual. Features continuous dynamic row appending without walls, seamless arrow/mouse/page-down navigation without cursor snapbacks, and dataset-wide scroll position representation.",
-  "updatedAt":  "2026-11-08T22:34:06.991139477Z",
+  "summary":  "Plan to eliminate vertical scrolling cursor oscillation, sync drifting, and flickering in Textual TUI by implementing a single-source-of-truth master-slave synchronization architecture with unified vertical scroll management and atomic row batching.",
+  "updatedAt":  "2026-11-08T23:18:08.480446296Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

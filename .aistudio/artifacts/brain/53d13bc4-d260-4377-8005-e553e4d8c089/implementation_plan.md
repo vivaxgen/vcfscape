@@ -1,91 +1,124 @@
-# Plan: Continuous Dynamic Row Appending & Fluid Vertical Scrolling
+# Plan: Master-Slave Vertical Synchronization & Elimination of Cursor Oscillation
 
-Eliminate the 150-row buffer boundary wall in the Textual TUI by transitioning from a rigid sliding-window to a continuous dynamic appending model that supports arrow keys, mouse wheel, and page up/down without cursor snapback or flickering.
-
----
-
-## 1. Root Cause Analysis
-
-### The Flaw with the Rigid 150-Row Sliding Window
-1. **The 150-Row Wall for Mouse & PageDown**:
-   - In Textual, a `DataTable` computes `max_scroll_y = row_count - viewport_height`.
-   - With `row_count` fixed at 150, scrolling via mouse wheel or dragging the scrollbar physically halts at row 150.
-   - When code tried to detect `scroll_y >= max_scroll_y` and shift the 150-row window by resetting `scroll_y = 0`, it caused the scroll position to snap all the way back to the top of the screen.
-
-2. **The Coordinate Snapback for Keyboard Arrow Down**:
-   - When cursor reached row 135 or 149 and shifted `buffer_start` forward by 40, code called `move_cursor(row = current_row - 40)`.
-   - Textual's internal `move_cursor` automatically invoked `scroll_to_cell`, causing the viewport to visibly jump 40 rows backward. The user felt like they were being pushed back every few keystrokes.
-
-3. **Scrollbar Desynchronization**:
-   - The native `DataTable` scrollbar only knew about the 150 rows in the DOM, giving no indication of where the user was within a 50,000-variant file.
+Resolve vertical scrolling flickering, row misalignment, and erratic cursor jumping in the Textual TUI by establishing a single-source-of-truth synchronization architecture that eliminates mutual event loops between the fixed variant table and sample matrix table.
 
 ---
 
-## 2. Technical Overhaul Strategy
+## User Review & Critical Architecture Decisions
 
-### Continuous Dynamic Append ("Infinite Scroll")
-Instead of maintaining a small 150-row window that has to be slid and re-keyed, the `VariantSplitView` will continuously append variant rows dynamically as the user scrolls down:
+> [!IMPORTANT]
+> **Confirmed User Requirements**:
+> 1. **Symptom Identified**: The cursor/pointer continuously moves up/down and jumps erratically to and from the original row and adjacent rows when scrolling vertically.
+> 2. **Target Architecture**: Eliminate mutual dual-controller conflicts by establishing a unified single-controller vertical synchronization pattern where one master vertical scroll controller drives both the fixed variant table and the sample matrix table.
+> 3. **Testing Constraint**: Do not write any more excessive mock tests; focus on solving the real Textual user interface issues directly.
+
+---
+
+## 1. Root Cause Analysis: Why the Cursor Oscillates and Flickers
+
+### A. The Asynchronous Event Echo Loop (Cursor Ping-Pong)
+Currently, both `FixedVariantTable` and `SampleMatrixTable` listen to their own highlight events and instruct the other table:
+```
+User presses Down
+     │
+     ▼
+FixedVariantTable.cursor_row becomes 141
+     │
+     ▼ (posts RowHighlighted)
+VariantSplitView.on_data_table_row_highlighted:
+     - Sets _syncing_cursor = True
+     - Calls sample_table.move_cursor(row=141)
+     - Sets _syncing_cursor = False (resets synchronously before event is processed!)
+     │
+     ▼ (Textual event queue processes sample_table move_cursor)
+SampleMatrixTable fires CellHighlighted:
+     - Checks _syncing_cursor (which is now FALSE!)
+     - Says: "Hey, cell highlighted at 141, move fixed_table.move_cursor(row=141)!"
+     │
+     ▼ (Sample table auto-scrolls to keep cursor visible)
+Textual's internal scroll_to_cell shifts viewport, causing FixedTable to adjust cursor to 140
+     │
+     ▼
+Infinite mutual ping-pong: Row 140 ↔ Row 141 ↔ Row 140 ... (Erratic continuous cursor jumping)
+```
+
+### B. The Dual `watch_scroll_y` Desynchronization
+Both tables run `watch_scroll_y` and call `peer.scroll_to(y=new_value)`.
+- If `abs(peer.scroll_y - new_value) >= 1.0` is used, fractional scroll values leave the tables misaligned by 1 line (e.g., variant info on row 140 lines up with sample genotype row 141).
+- When the threshold of `1.0` is crossed, the peer table abruptly snaps by 1 row, producing a visible jump and screen flicker.
+- Dual vertical scrollbars (one on fixed table and one on sample table) fight for render updates.
+
+### C. Non-Batched DOM Row Addition
+In `fetch_more_rows`, calling `self.fixed_table.add_row()` and `self.sample_table.add_row()` 100 times individually triggers up to 200 separate layout recalculations and repaints on the main thread while the user is actively scrolling, creating visual tearing.
+
+---
+
+## 2. Target Architecture: Master-Slave Unified Scroll & Lockstep Cursor
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                    Initial Load: 150 Rows                  │
-│                    (Rows 0 .. 149 in DOM)                  │
-└─────────────────────────────┬──────────────────────────────┘
-                              │
-                              ▼ User scrolls / arrows near bottom (e.g. Row 120)
-┌────────────────────────────────────────────────────────────┐
-│        Dynamically Append Batch (+100 Rows: 150 .. 249)    │
-│        - Total rows become 250                             │
-│        - Cursor continues naturally (no coordinate jumps!) │
-│        - Mouse wheel continues scrolling down smoothly     │
-│        - Zero cell recreation or scroll snapping           │
-└─────────────────────────────┬──────────────────────────────┘
-                              │
-                              ▼ Continued Scrolling
-┌────────────────────────────────────────────────────────────┐
-│        Dynamically Append Batch (+100 Rows: 250 .. 349)    │
-│        - High water mark buffer (smooth up to 5,000+ rows) │
-└────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        VariantSplitView                                │
+│       (Sole Authoritative Controller of active_row & scroll_y)         │
+├────────────────────────────────────────────────────────────────────────┤
+│  Keyboard Events: Arrow Up / Down, Page Up / Down, Home / End          │
+│  Mouse Events:    MouseScrollDown, MouseScrollUp                       │
+│  State:           current_row_idx, scroll_y, suppress_events_flag      │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+           ┌────────────────────────┴────────────────────────┐
+           ▼                                                 ▼
+┌──────────────────────────────┐        ┌───────────────────────────────┐
+│     FixedVariantTable        │        │      SampleMatrixTable        │
+│          (Slave)             │        │    (Master Horizontal/Scroll) │
+├──────────────────────────────┤        ├───────────────────────────────┤
+│ • overflow-y: hidden         │   │    │ • Shows vertical scrollbar    │
+│ • No vertical scrollbar      │   │    │ • Shows horizontal scrollbar  │
+│ • Does NOT watch scroll_y    │   │    │ • Drives master vertical      │
+│ • Does NOT command peer      │   │    │   scroll for both tables      │
+│ • Strictly receives row/y    │        │ • Handles sample cell cursor  │
+└──────────────────────────────┘        └───────────────────────────────┘
 ```
 
-### Why Continuous Append Fixes Every Issue:
-1. **Zero Snapback**: The cursor simply advances from row 148 to 149 to 150 to 151. `move_cursor` is never called with a negative offset.
-2. **No Mouse Wheel Wall**: `max_scroll_y` automatically expands as new rows are appended. The mouse wheel continues scrolling downward uninterrupted.
-3. **Fluid Page Up / Page Down**: Page Down moves through rows naturally without hitting an artificial wall.
-4. **Lightweight DOM**: Because sample columns are virtualized to 50 columns, appending 100 rows adds only `100 × 50 = 5,000` cells. Appending takes `<2ms` and consumes minimal memory.
+### Core Design Rules
+1. **Unidirectional Event Flow**: Child tables NEVER communicate directly with each other via `peer_table`.
+2. **Hidden Fixed Table Scrollbar**: `FixedVariantTable` has `overflow-y: hidden` and `scrollbar-size-vertical: 0`. Only `SampleMatrixTable` renders the authoritative vertical scrollbar for the split view.
+3. **Event Loop Suppression Token**: When `VariantSplitView` programmatically moves a cursor on either table, a suppression flag `_is_internal_update = True` blocks any recursive highlight handling until the operation completes.
+4. **Atomic Batch Row Insertion**: Wrap `add_row` loops inside `self.app.batch_update()` so Textual aggregates all 100 appended rows into a single render pass without intermediate frame flashes.
+5. **Exact Integer Scroll Alignment**: Both tables are locked to exact integer scroll coordinates (`scroll_to(y=int(y), animate=False, force=True)`), eliminating the 1-row drift.
 
 ---
 
 ## 3. Implementation Steps
 
-### Step 1: Continuous Append Engine in `VariantSplitView` (`src/vcfscape/ui/widgets/variant_table.py`)
-- Replace the rigid `shift_buffer` and `_check_buffer_boundary` logic with `_check_and_fetch_more(current_row_or_scroll_y)`:
-  - Trigger threshold: when `cursor_row >= self.row_count - 30` or `scroll_y >= self.max_scroll_y - 15`.
-  - Fetch chunk: calls `self.reader.get_slice(self.row_count, batch_size=100)`.
-  - Append to tables: calls `fixed_table.add_row(...)` and `sample_table.add_row(...)` for each new record.
-  - Updates `self.records.extend(new_records)` and refreshes scroll extents.
-  - No `clear()`, no in-place coordinate remapping, no snapbacks.
+### Step 1: Clean Up Child Table Classes (`src/vcfscape/ui/widgets/variant_table.py`)
+- In `FixedVariantTable`:
+  - Remove `peer_table` reference and mutual `watch_scroll_y` ping-pong.
+  - Disable vertical scrollbar via CSS: `overflow-y: hidden;` and `scrollbar-size-vertical: 0;`.
+  - Simplify `action_cursor_down` and `action_cursor_up` to delegate directly to `VariantSplitView.navigate_rows(delta)`.
+- In `SampleMatrixTable`:
+  - Remove `peer_table` reference.
+  - When its vertical scroll updates (`watch_scroll_y`), notify `VariantSplitView.on_master_scroll_y(new_value)` which directly sets `FixedVariantTable.scroll_to(y=new_value, animate=False, force=True)`.
 
-### Step 2: Input Handlers for Keyboard, Mouse, and Page Down
-- **Arrow Down (`action_cursor_down`)**:
-  - Simply allow `super().action_cursor_down()` to advance to the next row.
-  - If cursor is near the end of loaded rows, proactively append the next batch so the cursor moves seamlessly across the boundary.
-- **Mouse Wheel (`on_mouse_scroll_down`)**:
-  - Remove the broken `self.scroll_y >= self.max_scroll_y` reset logic.
-  - When scroll reaches near bottom, trigger `_check_and_fetch_more()`, allowing mouse wheel to scroll down smoothly without interruption.
-- **Page Down (`action_page_down`)**:
-  - Check if paging down approaches the buffer end; proactively append rows before delegating to `super().action_page_down()`.
+### Step 2: Centralize Row Navigation in `VariantSplitView`
+- Implement `navigate_rows(delta: int)`:
+  - Calculate `target_row = max(0, min(self.total_records_count - 1 if self.total_records_count else len(self.records) + 50, self.current_row_idx + delta))`.
+  - If `target_row >= len(self.records) - 25`, call `fetch_more_rows(100)`.
+  - Set `self._is_internal_update = True`.
+  - Move `fixed_table.move_cursor(row=target_row, animate=False)`.
+  - Move `sample_table.move_cursor(row=target_row, column=local_col, animate=False)`.
+  - Synchronize vertical scroll positions directly:
+    `self.fixed_table.scroll_to(y=self.sample_table.scroll_y, animate=False, force=True)`.
+  - Finally reset `self._is_internal_update = False`.
+  - Update `self.current_row_idx = target_row` and post `VariantSelected` ONCE.
 
-### Step 3: Dataset-Wide Position Indicator
-- Update Header and Footer bars to display exact dataset position proportional to the entire file:
-  - e.g., `Variant: 1,420 / 52,400 (2.7%) [ Pf3D7_07_v3:412,500 ]`
-  - Display a visual position track in the footer: `[████░░░░░░░░░░░░░░░░]` showing relative position within the full VCF.
-  - Keep the table's native scrollbar proportional to loaded records while accurately tracking dataset progress.
+### Step 3: Implement Atomic Batch Row Appending
+- In `fetch_more_rows`:
+  - Wrap the 100-row `add_row` loop in `with self.app.batch_update():` (or pause refresh during the append loop).
+  - Append all 100 rows to `fixed_table` and `sample_table` simultaneously.
+  - Keep scroll positions locked before and after batch append.
 
 ### Step 4: Verification
-- Test interactive vertical scrolling past rows 150, 300, 500, 1000 with:
-  - Down arrow holding past row 150 without coordinate jump.
-  - Page Down past multiple buffer batches.
-  - Mouse scroll down continuously past the initial 150 rows.
-  - Jumping to genomic locus (e.g. `Pf3D7_13_v3:1,725,259`) and appending from that locus.
-- Run complete test suite and TypeScript linting.
+- Verify that pressing Down arrow repeatedly through rows 140–200 moves smoothly one row at a time with ZERO cursor oscillation or bouncing.
+- Verify that mouse wheel down continuously scrolls past row 150 without screen stutter.
+- Verify that Page Down advances cleanly without desynchronizing left variant columns from right sample matrix columns.
+- Ensure all existing tests pass and run `compile_applet` and `lint_applet` with 0 errors.

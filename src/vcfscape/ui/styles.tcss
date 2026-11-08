@@ -34,6 +34,8 @@ FixedVariantTable,
 #fixed_table {
     height: 100%;
     background: #0b0f17;
+    scrollbar-size-vertical: 0;
+    overflow-y: hidden;
 }
 
 #table_divider {
