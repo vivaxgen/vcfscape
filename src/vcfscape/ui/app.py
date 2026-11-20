@@ -91,8 +91,19 @@ class VcfscapeApp(App):
 
     def on_mount(self) -> None:
         if not self.reader.total_variants_ready:
+            def _on_loading_dismiss(_result=None):
+                try:
+                    self.table_widget.focus()
+                except Exception:
+                    pass
+
             self.loading_screen = VcfLoadingScreen(os.path.basename(self.vcf_path))
-            self.push_screen(self.loading_screen)
+            self.push_screen(self.loading_screen, _on_loading_dismiss)
+        else:
+            try:
+                self.table_widget.focus()
+            except Exception:
+                pass
         # Reconcile any rows hydrated before UI loop mounted
         if hasattr(self.table_widget, "hydrate_rows") and self.table_widget.records:
             self.table_widget.hydrate_rows(list(range(len(self.table_widget.records))))
@@ -133,6 +144,10 @@ class VcfscapeApp(App):
         if self.loading_screen is not None:
             self.loading_screen.mark_complete(total)
             self.loading_screen = None
+        try:
+            self.table_widget.focus()
+        except Exception:
+            pass
         self.footer_bar.set_log(f"VCF file indexing complete: {total:,} total variants.")
 
     def compose(self) -> ComposeResult:
@@ -215,6 +230,10 @@ class VcfscapeApp(App):
                 if self.table_widget.records:
                     self.stats_pane.update_stats(self.table_widget.records[0])
                 self.footer_bar.set_log("Cohort updates saved and applied successfully.")
+            try:
+                self.table_widget.focus()
+            except Exception:
+                pass
 
         self.push_screen(CohortManagerScreen(self.cohort_manager), on_dismiss)
 
@@ -291,6 +310,10 @@ class VcfscapeApp(App):
                     self.footer_bar.set_log(f"Jumped to genomic locus {chrom}:{pos:,}")
                 else:
                     self.footer_bar.set_log(f"No variants found near {chrom}:{pos:,}")
+            try:
+                self.table_widget.focus()
+            except Exception:
+                pass
 
         self.push_screen(JumpRegionScreen(), on_dismiss)
 

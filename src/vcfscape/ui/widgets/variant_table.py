@@ -21,7 +21,9 @@ from vcfscape.core.vcf_reader import VariantRecord
 
 
 class FixedVariantTable(DataTable):
-    """Left anchored table displaying variant metadata columns (slave to SampleMatrixTable scroll)."""
+    """Left anchored passive table displaying variant metadata columns (commanded by VariantSplitView)."""
+
+    can_focus = False
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -39,17 +41,39 @@ class FixedVariantTable(DataTable):
     def on_leave(self, event: events.Leave) -> None:
         event.stop()
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "_arm_click_sync"):
+            sv._arm_click_sync()
+
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
+        event.prevent_default()
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "navigate_scroll"):
-            sv.navigate_scroll(delta=3)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=3)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
+        event.prevent_default()
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "navigate_scroll"):
-            sv.navigate_scroll(delta=-3)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=-3)
+
+    def on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
+        event.stop()
+        event.prevent_default()
+
+    def on_mouse_scroll_right(self, event: events.MouseScrollRight) -> None:
+        event.stop()
+        event.prevent_default()
+
+    def on_key(self, event: events.Key) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "handle_navigation_key"):
+            if sv.handle_navigation_key(event.key):
+                event.stop()
+                event.prevent_default()
 
     def action_cursor_down(self) -> None:
         sv = getattr(self, "split_view", None) or self.parent
@@ -57,8 +81,6 @@ class FixedVariantTable(DataTable):
             sv = sv.parent
         if sv is not None and hasattr(sv, "navigate_rows"):
             sv.navigate_rows(1)
-        else:
-            super().action_cursor_down()
 
     def action_cursor_up(self) -> None:
         sv = getattr(self, "split_view", None) or self.parent
@@ -66,26 +88,62 @@ class FixedVariantTable(DataTable):
             sv = sv.parent
         if sv is not None and hasattr(sv, "navigate_rows"):
             sv.navigate_rows(-1)
-        else:
-            super().action_cursor_up()
+
+    def action_cursor_left(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "advance_sample"):
+            sv.advance_sample(forward=False)
+
+    def action_cursor_right(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "advance_sample"):
+            sv.advance_sample(forward=True)
 
     def action_page_down(self) -> None:
         sv = getattr(self, "split_view", None)
         if sv is not None and hasattr(sv, "navigate_page"):
             sv.navigate_page(forward=True)
-        else:
-            super().action_page_down()
 
     def action_page_up(self) -> None:
         sv = getattr(self, "split_view", None)
         if sv is not None and hasattr(sv, "navigate_page"):
             sv.navigate_page(forward=False)
-        else:
-            super().action_page_up()
+
+    def action_scroll_home(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_home"):
+            sv.scroll_samples_home()
+
+    def action_scroll_end(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_end"):
+            sv.scroll_samples_end()
+
+    def action_scroll_top(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_home"):
+            sv.scroll_samples_home()
+
+    def action_scroll_bottom(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_end"):
+            sv.scroll_samples_end()
+
+    def action_scroll_up(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=-1)
+
+    def action_scroll_down(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=1)
 
 
 class SampleMatrixTable(DataTable):
-    """Right horizontally scrollable table displaying sample genotype cells (master for vertical scroll)."""
+    """Right horizontally scrollable passive table displaying sample genotype cells (commanded by VariantSplitView)."""
+
+    can_focus = False
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -102,27 +160,31 @@ class SampleMatrixTable(DataTable):
     def on_leave(self, event: events.Leave) -> None:
         event.stop()
 
-    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
-        super().watch_scroll_y(old_value, new_value)
+    def on_mouse_down(self, event: events.MouseDown) -> None:
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "on_master_scroll_y"):
-            sv.on_master_scroll_y(new_value)
+        if sv is not None and hasattr(sv, "_arm_click_sync"):
+            sv._arm_click_sync()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
+        event.prevent_default()
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "navigate_scroll"):
-            sv.navigate_scroll(delta=3)
-        else:
-            self.scroll_down(animate=False)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=3)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
+        event.prevent_default()
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "navigate_scroll"):
-            sv.navigate_scroll(delta=-3)
-        else:
-            self.scroll_up(animate=False)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=-3)
+
+    def on_key(self, event: events.Key) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "handle_navigation_key"):
+            if sv.handle_navigation_key(event.key):
+                event.stop()
+                event.prevent_default()
 
     def _get_column_bounds(self, col_idx: int) -> Tuple[int, int]:
         """Compute the horizontal range (col_left, col_right) in content coordinates."""
@@ -197,23 +259,13 @@ class SampleMatrixTable(DataTable):
 
     def action_cursor_right(self) -> None:
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "can_advance_sample") and sv.can_advance_sample(forward=True):
+        if sv is not None and hasattr(sv, "advance_sample"):
             sv.advance_sample(forward=True)
-        else:
-            super().action_cursor_right()
-            new_coord = getattr(self, "cursor_coordinate", None)
-            new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
-            self.scroll_column_centered(new_col)
 
     def action_cursor_left(self) -> None:
         sv = getattr(self, "split_view", None)
-        if sv is not None and hasattr(sv, "can_advance_sample") and sv.can_advance_sample(forward=False):
+        if sv is not None and hasattr(sv, "advance_sample"):
             sv.advance_sample(forward=False)
-        else:
-            super().action_cursor_left()
-            new_coord = getattr(self, "cursor_coordinate", None)
-            new_col = new_coord.column if new_coord is not None else getattr(self, "cursor_column", 0)
-            self.scroll_column_centered(new_col)
 
     def action_cursor_down(self) -> None:
         sv = getattr(self, "split_view", None) or self.parent
@@ -221,8 +273,6 @@ class SampleMatrixTable(DataTable):
             sv = sv.parent
         if sv is not None and hasattr(sv, "navigate_rows"):
             sv.navigate_rows(1)
-        else:
-            super().action_cursor_down()
 
     def action_cursor_up(self) -> None:
         sv = getattr(self, "split_view", None) or self.parent
@@ -230,33 +280,58 @@ class SampleMatrixTable(DataTable):
             sv = sv.parent
         if sv is not None and hasattr(sv, "navigate_rows"):
             sv.navigate_rows(-1)
-        else:
-            super().action_cursor_up()
 
     def action_page_down(self) -> None:
         sv = getattr(self, "split_view", None)
         if sv is not None and hasattr(sv, "navigate_page"):
             sv.navigate_page(forward=True)
-        else:
-            super().action_page_down()
 
     def action_page_up(self) -> None:
         sv = getattr(self, "split_view", None)
         if sv is not None and hasattr(sv, "navigate_page"):
             sv.navigate_page(forward=False)
-        else:
-            super().action_page_up()
+
+    def action_scroll_home(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_home"):
+            sv.scroll_samples_home()
+
+    def action_scroll_end(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_end"):
+            sv.scroll_samples_end()
+
+    def action_scroll_top(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_home"):
+            sv.scroll_samples_home()
+
+    def action_scroll_bottom(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "scroll_samples_end"):
+            sv.scroll_samples_end()
+
+    def action_scroll_up(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=-1)
+
+    def action_scroll_down(self) -> None:
+        sv = getattr(self, "split_view", None)
+        if sv is not None and hasattr(sv, "handle_mouse_scroll"):
+            sv.handle_mouse_scroll(delta=1)
 
 
 class VariantSplitView(Widget):
     """
-    Split table container:
-    - Left: FixedVariantTable for variant info columns (frozen horizontally)
-    - Center: Vertical divider line
-    - Right: SampleMatrixTable for sample genotype matrix (horizontally scrollable across all samples)
-    - Both tables stay in lockstep vertically during all scrolling and keyboard events.
-    - Buffer window uses in-place row cell updates without clear() during scrolling.
+    Top-level Split Table Controller:
+    - Holds focus and captures Up/Down/PageUp/PageDown/Left/Right/Home/End and mouse wheel.
+    - Commands Left (FixedVariantTable) and Right (SampleMatrixTable) in strict lockstep.
+    - Mouse wheel scrolls only the vertical viewport without moving the active row cursor.
+    - Home/End scroll horizontally to the first/last sample column without moving vertical scroll/row.
     """
+
+    can_focus = True
 
     class VariantSelected(Message):
         """Dispatched when cursor moves to a new variant row or sample cell."""
@@ -330,8 +405,11 @@ class VariantSplitView(Widget):
         self.samples = samples
         self._is_internal_update = False
         self._syncing_cursor = False
+        self._accept_next_highlight = False
+        self._click_timer: Optional[Any] = None
         self.current_row_idx = 0
         self.current_sample_idx = 0
+        self._viewport_scroll_y = 0
         self._last_notified: Optional[Tuple[int, int]] = None
 
         # Sample column virtualization state: visible viewport + buffer window
@@ -356,7 +434,7 @@ class VariantSplitView(Widget):
 
         self._rebuilding = False
 
-        # 1. Left Fixed Table
+        # 1. Left Fixed Table (passive slave)
         self.fixed_table = FixedVariantTable(id="fixed_table", cursor_type="row", zebra_stripes=True)
         self.fixed_table.show_cursor = True
 
@@ -367,7 +445,7 @@ class VariantSplitView(Widget):
         self.divider.styles.max_width = 1
         self.divider.styles.height = "100%"
 
-        # 3. Right Horizontally Scrollable Sample Table
+        # 3. Right Horizontally Scrollable Sample Table (passive slave)
         self.sample_table = SampleMatrixTable(id="sample_table", cursor_type="cell", zebra_stripes=True)
         self.sample_table.styles.width = "1fr"
         self.sample_table.styles.height = "100%"
@@ -387,61 +465,238 @@ class VariantSplitView(Widget):
         """Disable live mouse pointer tracking across split view container."""
         event.stop()
 
-    def on_master_scroll_y(self, new_value: float) -> None:
-        """Master-slave vertical scroll synchronization: FixedVariantTable follows SampleMatrixTable."""
-        if new_value >= getattr(self.sample_table, "max_scroll_y", 0) - 15:
-            self.fetch_more_rows(100)
+    def _arm_click_sync(self) -> None:
+        """Allow the next mouse-initiated RowHighlighted/CellHighlighted and return focus to split view."""
+        self._accept_next_highlight = True
+        if self._click_timer is not None:
+            try:
+                self._click_timer.stop()
+            except Exception:
+                pass
+            self._click_timer = None
         try:
-            self.fixed_table.scroll_to(y=new_value, animate=False, force=True)
+            self._click_timer = self.set_timer(0.3, self._disarm_click_sync)
         except Exception:
             pass
 
+    def _disarm_click_sync(self) -> None:
+        self._accept_next_highlight = False
+        if self._click_timer is not None:
+            try:
+                self._click_timer.stop()
+            except Exception:
+                pass
+            self._click_timer = None
+        try:
+            self.focus()
+        except Exception:
+            pass
+
+    def _get_visible_row_count(self) -> int:
+        """Compute common visible row count across both tables (respecting horizontal scrollbar)."""
+        heights: List[int] = []
+        for tbl in (self.fixed_table, self.sample_table):
+            try:
+                scr = getattr(tbl, "scrollable_content_region", None)
+                if scr is not None and getattr(scr, "height", 0) > 1:
+                    hdr_h = getattr(tbl, "header_height", 1) if getattr(tbl, "show_header", True) else 0
+                    heights.append(max(1, scr.height - hdr_h))
+                    continue
+                size_obj = getattr(tbl, "size", None)
+                if size_obj is not None and getattr(size_obj, "height", 0) > 2:
+                    hdr_h = getattr(tbl, "header_height", 1) if getattr(tbl, "show_header", True) else 0
+                    heights.append(max(1, size_obj.height - hdr_h - 1))
+            except Exception:
+                pass
+        return min(heights) if heights else 15
+
+    def _get_max_scroll_y(self) -> int:
+        """Maximum vertical scroll offset shared cleanly across both tables."""
+        visible_rows = self._get_visible_row_count()
+        content_max = max(0, len(self.records) - visible_rows)
+        table_maxes: List[int] = []
+        for tbl in (self.fixed_table, self.sample_table):
+            try:
+                m = getattr(tbl, "max_scroll_y", None)
+                if m is not None and m >= 0:
+                    table_maxes.append(int(m))
+            except Exception:
+                pass
+        if table_maxes:
+            return max(0, min(content_max, min(table_maxes)))
+        return content_max
+
+    def _move_table_cursor_noscroll(self, table: DataTable, row: int, column: Optional[int] = None) -> None:
+        """Move DataTable cursor without triggering Textual's async _scroll_cursor_into_view."""
+        try:
+            if column is None:
+                table.move_cursor(row=row, animate=False, scroll=False)
+            else:
+                table.move_cursor(row=row, column=column, animate=False, scroll=False)
+        except TypeError:
+            if column is None:
+                table.move_cursor(row=row, animate=False)
+            else:
+                table.move_cursor(row=row, column=column, animate=False)
+
+    def _command_tables_scroll_y(self, target_y: int) -> None:
+        """Command both FixedVariantTable and SampleMatrixTable to the exact same vertical scroll offset."""
+        max_y = self._get_max_scroll_y()
+        clamped_y = max(0, min(max_y, int(target_y)))
+        self._viewport_scroll_y = clamped_y
+
+        batch_ctx = None
+        if hasattr(self, "app") and hasattr(self.app, "batch_update"):
+            try:
+                batch_ctx = self.app.batch_update()
+            except Exception:
+                batch_ctx = None
+
+        def _apply():
+            try:
+                self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
+            except Exception:
+                pass
+            try:
+                self.sample_table.scroll_to(y=clamped_y, animate=False, force=True)
+            except Exception:
+                pass
+
+        if batch_ctx is not None:
+            with batch_ctx:
+                _apply()
+        else:
+            _apply()
+
+    def on_key(self, event: events.Key) -> None:
+        """Top-level key interception for VariantSplitView."""
+        if self.handle_navigation_key(event.key):
+            event.stop()
+            event.prevent_default()
+
+    def handle_navigation_key(self, key: str) -> bool:
+        """Single authoritative keyboard navigation dispatcher."""
+        if key == "up":
+            self.navigate_rows(-1)
+            return True
+        if key == "down":
+            self.navigate_rows(1)
+            return True
+        if key == "pageup":
+            self.navigate_page(forward=False)
+            return True
+        if key == "pagedown":
+            self.navigate_page(forward=True)
+            return True
+        if key == "left":
+            self.advance_sample(forward=False)
+            return True
+        if key == "right":
+            self.advance_sample(forward=True)
+            return True
+        if key == "home":
+            self.scroll_samples_home()
+            return True
+        if key == "end":
+            self.scroll_samples_end()
+            return True
+        return False
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        event.stop()
+        event.prevent_default()
+        self.handle_mouse_scroll(delta=3)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        event.stop()
+        event.prevent_default()
+        self.handle_mouse_scroll(delta=-3)
+
+    def handle_mouse_scroll(self, delta: int) -> None:
+        """
+        Scroll ONLY the vertical viewport of both tables in lockstep.
+        Leaves active highlighted row cursor and sidebar selection untouched.
+        """
+        if not self.records:
+            return
+        visible_rows = self._get_visible_row_count()
+        target_y = max(0, self._viewport_scroll_y + delta)
+
+        if delta > 0 and self._is_main_stream_view:
+            while target_y + visible_rows >= len(self.records) - 15:
+                if not self.fetch_more_rows(100):
+                    break
+
+        self._command_tables_scroll_y(target_y)
+
+    def on_master_scroll_y(self, new_value: float) -> None:
+        """Backward-compatible helper aligning both tables to new_value."""
+        self._command_tables_scroll_y(int(new_value))
+
     def navigate_rows(self, delta: int) -> None:
-        """Centralized row navigation for keyboard and mouse."""
+        """Centralized row navigation for Up/Down/PageUp/PageDown keys."""
+        if not self.records:
+            return
         target = self.current_row_idx + delta
         if delta > 0 and self.total_records_count is not None and target >= self.total_records_count:
-            return
-        if delta < 0 and target < 0:
+            target = max(0, self.total_records_count - 1)
+        if target < 0:
             target = 0
         self.set_active_row(target, sync_fixed=True, sync_sample=True)
 
-    def navigate_page(self, forward: bool, page_size: int = 15) -> None:
-        """Centralized page-up / page-down navigation."""
-        delta = page_size if forward else -page_size
+    def navigate_page(self, forward: bool, page_size: Optional[int] = None) -> None:
+        """Centralized PageUp / PageDown navigation sized to visible viewport."""
+        step = page_size if page_size is not None else max(1, self._get_visible_row_count() - 1)
+        delta = step if forward else -step
         self.navigate_rows(delta)
 
     def navigate_scroll(self, delta: int) -> None:
-        """Handle mouse wheel vertical scroll: sample_table drives vertical scroll."""
-        if delta > 0:
-            if self.sample_table.scroll_y >= getattr(self.sample_table, "max_scroll_y", 0) - 15:
-                self.fetch_more_rows(100)
-            for _ in range(abs(delta)):
-                self.sample_table.scroll_down(animate=False)
-        else:
-            for _ in range(abs(delta)):
-                self.sample_table.scroll_up(animate=False)
-        self.on_master_scroll_y(self.sample_table.scroll_y)
+        """Backward-compatible helper delegating mouse wheel scroll to lockstep viewport scroller."""
+        self.handle_mouse_scroll(delta)
+
+    def scroll_samples_home(self) -> None:
+        """Home key: scroll horizontally to the first sample column without changing vertical position."""
+        if not self.samples:
+            return
+        self.set_active_sample(0, force_center=False, horizontal_align="home")
+
+    def scroll_samples_end(self) -> None:
+        """End key: scroll horizontally to the last sample column without changing vertical position."""
+        if not self.samples:
+            return
+        self.set_active_sample(len(self.samples) - 1, force_center=False, horizontal_align="end")
 
     def _sync_both_tables_cursor(self, row: int, col: int) -> None:
         self._is_internal_update = True
+        batch_ctx = None
+        if hasattr(self, "app") and hasattr(self.app, "batch_update"):
+            try:
+                batch_ctx = self.app.batch_update()
+            except Exception:
+                batch_ctx = None
+
+        def _apply():
+            try:
+                self._move_table_cursor_noscroll(self.fixed_table, row=row)
+            except Exception:
+                pass
+            try:
+                local_col = max(0, min(self.sample_window_size - 1, col - self.sample_window_start)) if self.sample_window_size > 0 else 0
+                self._move_table_cursor_noscroll(self.sample_table, row=row, column=local_col)
+            except Exception:
+                pass
+            try:
+                self.fixed_table.scroll_to(y=self._viewport_scroll_y, animate=False, force=True)
+                self.sample_table.scroll_to(y=self._viewport_scroll_y, animate=False, force=True)
+            except Exception:
+                pass
+
         try:
-            try:
-                self.fixed_table.move_cursor(row=row, animate=False)
-            except Exception:
-                pass
-
-            try:
-                local_col = max(0, min(self.sample_window_size - 1, col - self.sample_window_start))
-                self.sample_table.move_cursor(row=row, column=local_col, animate=False)
-            except Exception:
-                pass
-
-            # Align fixed_table vertical scroll with sample_table
-            sample_y = getattr(self.sample_table, "scroll_y", 0)
-            try:
-                self.fixed_table.scroll_to(y=sample_y, animate=False, force=True)
-            except Exception:
-                pass
+            if batch_ctx is not None:
+                with batch_ctx:
+                    _apply()
+            else:
+                _apply()
         finally:
             self._is_internal_update = False
 
@@ -465,7 +720,12 @@ class VariantSplitView(Widget):
 
         self.set_active_sample(target)
 
-    def set_active_sample(self, global_col: int, force_center: bool = False) -> None:
+    def set_active_sample(
+        self,
+        global_col: int,
+        force_center: bool = False,
+        horizontal_align: Optional[str] = None,
+    ) -> None:
         """Sets active sample column across virtualized cohort sample columns."""
         if not self.samples:
             return
@@ -508,11 +768,31 @@ class VariantSplitView(Widget):
                     pass
 
         local_col = max(0, min(self.sample_window_size - 1, global_col - self.sample_window_start))
+        self._is_internal_update = True
         try:
-            self.sample_table.move_cursor(row=self.current_row_idx, column=local_col, animate=False)
+            self._move_table_cursor_noscroll(self.sample_table, row=self.current_row_idx, column=local_col)
         except Exception:
             pass
-        self.sample_table.scroll_column_centered(local_col, force=force_center)
+        finally:
+            self._is_internal_update = False
+
+        if horizontal_align == "home":
+            try:
+                self.sample_table.scroll_to(x=0, animate=False, force=True)
+            except Exception:
+                pass
+        elif horizontal_align == "end":
+            try:
+                max_x = getattr(self.sample_table, "max_scroll_x", None)
+                if max_x is not None and max_x >= 0:
+                    self.sample_table.scroll_to(x=max_x, animate=False, force=True)
+                else:
+                    self.sample_table.scroll_column_centered(local_col, force=True)
+            except Exception:
+                pass
+        else:
+            self.sample_table.scroll_column_centered(local_col, force=force_center)
+
         self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
     def fetch_more_rows(self, batch_size: int = 100) -> bool:
@@ -541,7 +821,10 @@ class VariantSplitView(Widget):
 
             batch_ctx = None
             if hasattr(self, "app") and hasattr(self.app, "batch_update"):
-                batch_ctx = self.app.batch_update()
+                try:
+                    batch_ctx = self.app.batch_update()
+                except Exception:
+                    batch_ctx = None
 
             def _append():
                 existing_rows = getattr(self.fixed_table, "row_count", 0)
@@ -581,10 +864,10 @@ class VariantSplitView(Widget):
             if len(new_slice) < batch_size and self.total_records_count is None:
                 self.total_records_count = len(self.records)
 
-            # Re-align fixed_table vertical scroll with sample_table
-            sample_y = getattr(self.sample_table, "scroll_y", 0)
+            # Re-align both tables to authoritative vertical scroll offset
             try:
-                self.fixed_table.scroll_to(y=sample_y, animate=False, force=True)
+                self.fixed_table.scroll_to(y=self._viewport_scroll_y, animate=False, force=True)
+                self.sample_table.scroll_to(y=self._viewport_scroll_y, animate=False, force=True)
             except Exception:
                 pass
 
@@ -600,14 +883,29 @@ class VariantSplitView(Widget):
             return
 
         updated_current = False
-        for idx in row_indices:
-            if 0 <= idx < len(self.records):
-                hydrated = self.reader.get_hydrated_record(idx)
-                if hydrated is not None and getattr(hydrated, "samples_loaded", False):
-                    self.records[idx] = hydrated
-                    self._update_sample_row_cells(f"row_{idx}", hydrated)
-                    if idx == self.current_row_idx:
-                        updated_current = True
+        batch_ctx = None
+        if hasattr(self, "app") and hasattr(self.app, "batch_update"):
+            try:
+                batch_ctx = self.app.batch_update()
+            except Exception:
+                batch_ctx = None
+
+        def _update_cells():
+            nonlocal updated_current
+            for idx in row_indices:
+                if 0 <= idx < len(self.records):
+                    hydrated = self.reader.get_hydrated_record(idx)
+                    if hydrated is not None and getattr(hydrated, "samples_loaded", False):
+                        self.records[idx] = hydrated
+                        self._update_sample_row_cells(f"row_{idx}", hydrated)
+                        if idx == self.current_row_idx:
+                            updated_current = True
+
+        if batch_ctx is not None:
+            with batch_ctx:
+                _update_cells()
+        else:
+            _update_cells()
 
         if updated_current and 0 <= self.current_row_idx < len(self.records):
             self._last_notified = None
@@ -625,7 +923,7 @@ class VariantSplitView(Widget):
         self.navigate_rows(1 if forward else -1)
 
     def set_active_row(self, target_row: int, sync_fixed: bool = True, sync_sample: bool = True) -> None:
-        """Sets active variant row, dynamically fetching rows if target is beyond loaded count."""
+        """Sets active variant row and commands both tables' cursor and vertical scroll in lockstep."""
         if target_row < 0:
             target_row = 0
         if self.total_records_count is not None and target_row >= self.total_records_count:
@@ -644,27 +942,51 @@ class VariantSplitView(Widget):
 
         self.current_row_idx = target_row
 
+        # Compute authoritative shared vertical scroll offset only if target_row leaves visible viewport
+        visible_rows = self._get_visible_row_count()
+        target_y = self._viewport_scroll_y
+        if target_row < target_y:
+            target_y = target_row
+        elif target_row >= target_y + visible_rows:
+            target_y = target_row - visible_rows + 1
+        max_y = self._get_max_scroll_y()
+        target_y = max(0, min(max_y, target_y))
+        self._viewport_scroll_y = target_y
+
         self._is_internal_update = True
-        try:
+        batch_ctx = None
+        if hasattr(self, "app") and hasattr(self.app, "batch_update"):
+            try:
+                batch_ctx = self.app.batch_update()
+            except Exception:
+                batch_ctx = None
+
+        def _apply():
             if sync_fixed and getattr(self.fixed_table, "row_count", 0) > target_row:
                 try:
-                    self.fixed_table.move_cursor(row=target_row, animate=False)
+                    self._move_table_cursor_noscroll(self.fixed_table, row=target_row)
                 except Exception:
                     pass
 
             if sync_sample and getattr(self.sample_table, "row_count", 0) > target_row:
                 try:
-                    local_col = max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start))
-                    self.sample_table.move_cursor(row=target_row, column=local_col, animate=False)
+                    local_col = max(0, min(self.sample_window_size - 1, self.current_sample_idx - self.sample_window_start)) if self.sample_window_size > 0 else 0
+                    self._move_table_cursor_noscroll(self.sample_table, row=target_row, column=local_col)
                 except Exception:
                     pass
 
-            # Align fixed_table vertical scroll with master sample_table
-            sample_y = getattr(self.sample_table, "scroll_y", 0)
             try:
-                self.fixed_table.scroll_to(y=sample_y, animate=False, force=True)
+                self.fixed_table.scroll_to(y=target_y, animate=False, force=True)
+                self.sample_table.scroll_to(y=target_y, animate=False, force=True)
             except Exception:
                 pass
+
+        try:
+            if batch_ctx is not None:
+                with batch_ctx:
+                    _apply()
+            else:
+                _apply()
         finally:
             self._is_internal_update = False
 
@@ -706,12 +1028,17 @@ class VariantSplitView(Widget):
 
     def on_mount(self):
         self.rebuild_tables()
+        try:
+            self.focus()
+        except Exception:
+            pass
 
     def set_records(self, records: List[VariantRecord], is_main_stream: bool = False):
         self._is_main_stream_view = is_main_stream
         self.records = list(records)
         self.current_row_idx = 0
         self.buffer_start = 0
+        self._viewport_scroll_y = 0
         if is_main_stream and self.reader:
             if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
                 self.total_records_count = self.reader.get_total_variants_async()
@@ -723,11 +1050,7 @@ class VariantSplitView(Widget):
             self.total_records_count = len(self.records)
         self._ensure_row_capacity()
         self._update_all_rows_in_place()
-        try:
-            self.fixed_table.scroll_to(y=0, animate=False, force=True)
-            self.sample_table.scroll_to(y=0, animate=False, force=True)
-        except Exception:
-            pass
+        self._command_tables_scroll_y(0)
         self._last_notified = None
         self._sync_both_tables_cursor(0, self.current_sample_idx)
         self._notify_selection(0, self.current_sample_idx)
@@ -957,27 +1280,30 @@ class VariantSplitView(Widget):
         """Backward compatibility stub for horizontal sample navigation."""
         pass
 
-    # Synchronize Cursor Movement (Arrow Up/Down, Cell Selection)
+    # Click-only highlight sync (delayed programmatic move_cursor echoes are ignored)
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if self._rebuilding or self._is_fetching_more or self._is_internal_update:
             return
+        if not self._accept_next_highlight:
+            return
+        self._disarm_click_sync()
         if event.data_table.id == "fixed_table":
             target_row = event.cursor_row
-            if self.current_row_idx != target_row:
-                self.set_active_row(target_row, sync_fixed=False, sync_sample=True)
+            self.set_active_row(target_row, sync_fixed=False, sync_sample=True)
 
     def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
         if self._rebuilding or self._is_fetching_more or self._is_internal_update:
             return
+        if not self._accept_next_highlight:
+            return
+        self._disarm_click_sync()
         if event.data_table.id == "sample_table":
             target_row = event.coordinate.row
             local_col = event.coordinate.column
             global_col = self.sample_window_start + local_col
-
-            if self.current_row_idx != target_row or self.current_sample_idx != global_col:
-                self.current_sample_idx = global_col
-                self.sample_table.scroll_column_centered(local_col, force=False)
-                self.set_active_row(target_row, sync_fixed=True, sync_sample=False)
+            self.current_sample_idx = global_col
+            self.sample_table.scroll_column_centered(local_col, force=False)
+            self.set_active_row(target_row, sync_fixed=True, sync_sample=False)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int) -> None:
         if 0 <= row_idx < len(self.records):

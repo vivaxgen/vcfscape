@@ -54,6 +54,15 @@ SampleMatrixTable,
     background: #0b0f17;
 }
 
+FixedVariantTable > .datatable--cursor,
+SampleMatrixTable > .datatable--cursor,
+#fixed_table > .datatable--cursor,
+#sample_table > .datatable--cursor {
+    background: #1d4ed8;
+    color: #f8fafc;
+    text-style: bold;
+}
+
 FixedVariantTable > .datatable--hover,
 SampleMatrixTable > .datatable--hover,
 #fixed_table > .datatable--hover,
@@ -117,6 +126,13 @@ Screen.theme-light HeaderBar {
 Screen.theme-light FixedVariantTable,
 Screen.theme-light SampleMatrixTable {
     background: #ffffff;
+}
+
+Screen.theme-light FixedVariantTable > .datatable--cursor,
+Screen.theme-light SampleMatrixTable > .datatable--cursor {
+    background: #2563eb;
+    color: #ffffff;
+    text-style: bold;
 }
 
 Screen.theme-light SidebarPanel {
