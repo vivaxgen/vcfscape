@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 from typing import Optional, List, Set
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual.binding import Binding
@@ -195,6 +196,12 @@ class VcfscapeApp(App):
         self._stop_hydration_timer()
         if hasattr(self.reader, "close"):
             self.reader.close()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "ctrl+c":
+            event.stop()
+            event.prevent_default()
+            self.action_quit()
 
     def action_quit(self) -> None:
         self._closing = True

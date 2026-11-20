@@ -127,7 +127,11 @@ def main(vcf_file, demo, cohorts, web, port, no_browser, token, no_token):
         sys.exit(1)
 
     app = VcfscapeApp(vcf_path=target_vcf)
-    app.run()
+    try:
+        app.run()
+    finally:
+        if hasattr(app, "reader") and hasattr(app.reader, "close"):
+            app.reader.close()
 
 
 if __name__ == "__main__":

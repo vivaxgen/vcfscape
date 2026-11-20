@@ -49,6 +49,8 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
         Binding("escape", "dismiss_screen", "Dismiss", show=False),
         Binding("enter", "dismiss_screen", "Dismiss", show=False),
         Binding("space", "dismiss_screen", "Dismiss", show=False),
+        Binding("q", "quit_app", "Quit", show=False),
+        Binding("ctrl+c", "quit_app", "Quit", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -187,6 +189,16 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
 
     def action_dismiss_screen(self) -> None:
         self._safe_dismiss(self._current_count)
+
+    def action_quit_app(self) -> None:
+        try:
+            app_obj = self.app
+            if hasattr(app_obj, "action_quit"):
+                app_obj.action_quit()
+            elif hasattr(app_obj, "exit"):
+                app_obj.exit()
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_dismiss":
