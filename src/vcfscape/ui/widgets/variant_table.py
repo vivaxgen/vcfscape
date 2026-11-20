@@ -208,7 +208,10 @@ def _apply_arrow_backend_to_table(
     if hasattr(table, "set_backend"):
         table.set_backend(new_backend)
     else:
-        ordered = getattr(table, "ordered_columns", None)
+        try:
+            ordered = getattr(table, "ordered_columns", None)
+        except Exception:
+            ordered = None
         if ordered is not None:
             cur_labels = [str(getattr(c, "label", c)) for c in ordered]
         elif isinstance(getattr(table, "columns", None), dict):
@@ -219,6 +222,8 @@ def _apply_arrow_backend_to_table(
         table.backend = new_backend
 
         if column_labels is not None and cur_labels != column_labels:
+            if getattr(table, "_column_labels", None) is not None:
+                table._column_labels = list(column_labels)
             _rebuild_table_columns(table, new_backend, column_labels)
 
     for cls in type(table).__mro__:
@@ -226,14 +231,10 @@ def _apply_arrow_backend_to_table(
             if isinstance(prop_obj, cached_property):
                 table.__dict__.pop(prop_name, None)
 
-    for prop_name in (
-        "ordered_columns",
-        "ordered_rows",
-        "_ordered_column_keys",
-        "_ordered_columns",
-    ):
-        if hasattr(table, "__dict__"):
-            table.__dict__.pop(prop_name, None)
+    # Never pop instance attributes like _ordered_columns from __dict__; reset to None if present
+    for attr_name in ("_ordered_columns", "_ordered_column_keys", "_ordered_rows"):
+        if hasattr(table, "__dict__") and attr_name in table.__dict__:
+            setattr(table, attr_name, None)
 
     for cache_attr in (
         "_row_cache",
@@ -1409,7 +1410,10 @@ class VariantSplitView(Widget):
             yield self.sample_table
 
     def on_mount(self):
-        self.rebuild_tables()
+        if getattr(self.fixed_table, "backend", None) is None or getattr(self.sample_table, "backend", None) is None:
+            self.rebuild_tables()
+        else:
+            self._notify_selection(self.current_row_idx, self.current_sample_idx)
         try:
             self.focus()
         except Exception:
