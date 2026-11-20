@@ -3,6 +3,7 @@ Main Textual Application for VCFscape - VCF inspector part of vivaxGEN Project.
 """
 
 import os
+from typing import Optional, List
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual.binding import Binding
@@ -65,7 +66,11 @@ class VcfscapeApp(App):
         self.header_bar.backend = self.reader.backend
 
         # True split with virtual buffer: left fixed columns + right scrollable samples
-        initial_slice = self.reader.get_slice(0, 150)
+        try:
+            initial_slice = self.reader.get_slice(0, 150, allow_placeholder=True)
+        except TypeError:
+            initial_slice = self.reader.get_slice(0, 150)
+
         self.table_widget = VariantSplitView(
             records=initial_slice,
             samples=self.reader.samples,
@@ -74,6 +79,10 @@ class VcfscapeApp(App):
         self.sidebar_panel = SidebarPanel(self.cohort_manager)
         self.stats_pane = CohortStatsPane(self.cohort_manager)
         self.footer_bar = FooterBar()
+
+        # Hook async sample hydration callback from Handle 2
+        if hasattr(self.reader, "add_hydration_callback"):
+            self.reader.add_hydration_callback(self._on_samples_hydrated)
 
         # If counting in background, hook progress and completion callbacks
         if not self.reader.total_variants_ready:
@@ -84,6 +93,23 @@ class VcfscapeApp(App):
         if not self.reader.total_variants_ready:
             self.loading_screen = VcfLoadingScreen(os.path.basename(self.vcf_path))
             self.push_screen(self.loading_screen)
+        # Reconcile any rows hydrated before UI loop mounted
+        if hasattr(self.table_widget, "hydrate_rows") and self.table_widget.records:
+            self.table_widget.hydrate_rows(list(range(len(self.table_widget.records))))
+
+    def on_unmount(self) -> None:
+        if hasattr(self.reader, "close"):
+            self.reader.close()
+
+    def _on_samples_hydrated(self, indices: List[int]) -> None:
+        try:
+            self.call_from_thread(self._apply_samples_hydrated, indices)
+        except Exception:
+            pass
+
+    def _apply_samples_hydrated(self, indices: List[int]) -> None:
+        if hasattr(self, "table_widget") and hasattr(self.table_widget, "hydrate_rows"):
+            self.table_widget.hydrate_rows(indices)
 
     def _on_progress_update(self, count: int) -> None:
         try:
@@ -214,11 +240,25 @@ class VcfscapeApp(App):
         curr_idx = filters.index(self.current_filter) if self.current_filter in filters else 0
         self.current_filter = filters[(curr_idx + 1) % len(filters)]
 
-        filtered_records = self.reader.filter_records(variant_type=self.current_filter)
-        self.table_widget.set_records(filtered_records)
-        self.header_bar.total_variants = len(filtered_records)
-        self.sidebar_panel.cohort_widget.set_filter(self.current_filter)
-        self.footer_bar.set_log(f"Filter set to [{self.current_filter}]. Displaying {len(filtered_records)} variants.")
+        if self.current_filter == "ALL":
+            try:
+                initial_records = self.reader.get_slice(0, 150, allow_placeholder=True)
+            except TypeError:
+                initial_records = self.reader.get_slice(0, 150)
+            self.table_widget.set_records(initial_records, is_main_stream=True)
+            total = self.reader.get_total_variants_async() if hasattr(self.reader, "get_total_variants_async") else None
+            if total is None and getattr(self.reader, "total_variants_ready", False):
+                total = self.reader.total_variants
+            self.header_bar.total_variants = total
+            self.sidebar_panel.cohort_widget.set_filter(self.current_filter)
+            total_str = f"{total:,}" if isinstance(total, int) else "streaming"
+            self.footer_bar.set_log(f"Filter set to [ALL]. Displaying {total_str} variants.")
+        else:
+            filtered_records = self.reader.filter_records(variant_type=self.current_filter)
+            self.table_widget.set_records(filtered_records, is_main_stream=False)
+            self.header_bar.total_variants = len(filtered_records)
+            self.sidebar_panel.cohort_widget.set_filter(self.current_filter)
+            self.footer_bar.set_log(f"Filter set to [{self.current_filter}]. Displaying {len(filtered_records)} variants.")
 
     def action_toggle_theme(self):
         """Toggle between Dark and Light mode."""

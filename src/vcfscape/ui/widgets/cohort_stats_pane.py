@@ -179,6 +179,10 @@ class CohortStatsPane(Widget):
         """
         self.current_record = record
         if not self.is_collapsed:
+            if not getattr(record, "samples_loaded", True):
+                self.stats = {}
+                self._refresh_display()
+                return
             self.stats = self.cohort_manager.calculate_variant_stats(
                 {
                     "genotypes": record.genotypes,
@@ -197,7 +201,11 @@ class CohortStatsPane(Widget):
         self.refresh()
 
     def _render_table(self):
-        if not self.current_record or not self.stats:
+        if not self.current_record:
+            return Text(" No variant selected for cohort statistics.", style="dim italic")
+        if not getattr(self.current_record, "samples_loaded", True):
+            return Text(" Hydrating sample genotypes for cohort statistics...", style="dim italic bright_cyan")
+        if not self.stats:
             return Text(" No variant selected for cohort statistics.", style="dim italic")
 
         r = self.current_record

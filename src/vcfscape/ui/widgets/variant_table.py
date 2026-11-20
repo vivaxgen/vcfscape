@@ -343,6 +343,7 @@ class VariantSplitView(Widget):
         self.window_size = 150
         self.buffer_start = 0
         self._is_fetching_more = False
+        self._is_main_stream_view = True
         if self.reader:
             if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
                 self.total_records_count = self.reader.get_total_variants_async()
@@ -516,7 +517,7 @@ class VariantSplitView(Widget):
 
     def fetch_more_rows(self, batch_size: int = 100) -> bool:
         """Dynamically appends more rows to both tables as user scrolls down."""
-        if not self.reader or self._is_fetching_more:
+        if not self.reader or self._is_fetching_more or not self._is_main_stream_view:
             return False
 
         current_loaded = len(self.records)
@@ -525,7 +526,11 @@ class VariantSplitView(Widget):
 
         self._is_fetching_more = True
         try:
-            new_slice = self.reader.get_slice(current_loaded, batch_size)
+            try:
+                new_slice = self.reader.get_slice(current_loaded, batch_size, allow_placeholder=True)
+            except TypeError:
+                new_slice = self.reader.get_slice(current_loaded, batch_size)
+
             if not new_slice:
                 if self.total_records_count is None:
                     self.total_records_count = current_loaded
@@ -539,10 +544,16 @@ class VariantSplitView(Widget):
                 batch_ctx = self.app.batch_update()
 
             def _append():
+                existing_rows = getattr(self.fixed_table, "row_count", 0)
                 for r in new_slice:
                     r_idx = len(self.records)
                     self.records.append(r)
                     row_key = f"row_{r_idx}"
+
+                    if r_idx < existing_rows:
+                        self._update_fixed_row_cells(row_key, r)
+                        self._update_sample_row_cells(row_key, r)
+                        continue
 
                     # Fixed table row
                     cells_dict = self._get_fixed_row_cells(r)
@@ -550,11 +561,15 @@ class VariantSplitView(Widget):
                     self.fixed_table.add_row(*row_cells_fixed, key=row_key)
 
                     # Sample table row
+                    samples_loaded = getattr(r, "samples_loaded", True)
                     row_cells_sample = []
                     for s in visible_samples:
-                        s_dict = r.sample_data.get(s, {})
-                        cell_val = str(s_dict.get(self.format_tag, "."))
-                        row_cells_sample.append(self._style_sample_cell(cell_val, self.format_tag))
+                        if not samples_loaded:
+                            row_cells_sample.append(Text("...", style="dim bright_black"))
+                        else:
+                            s_dict = r.sample_data.get(s, {})
+                            cell_val = str(s_dict.get(self.format_tag, "."))
+                            row_cells_sample.append(self._style_sample_cell(cell_val, self.format_tag))
                     self.sample_table.add_row(*row_cells_sample, key=row_key)
 
             if batch_ctx is not None:
@@ -577,6 +592,27 @@ class VariantSplitView(Widget):
         finally:
             self._is_fetching_more = False
 
+    def hydrate_rows(self, row_indices: List[int]) -> None:
+        """Update placeholder sample cells in place when Handle 2 hydrates sample payloads."""
+        if not self.reader or not self._is_main_stream_view:
+            return
+        if not hasattr(self.reader, "get_hydrated_record"):
+            return
+
+        updated_current = False
+        for idx in row_indices:
+            if 0 <= idx < len(self.records):
+                hydrated = self.reader.get_hydrated_record(idx)
+                if hydrated is not None and getattr(hydrated, "samples_loaded", False):
+                    self.records[idx] = hydrated
+                    self._update_sample_row_cells(f"row_{idx}", hydrated)
+                    if idx == self.current_row_idx:
+                        updated_current = True
+
+        if updated_current and 0 <= self.current_row_idx < len(self.records):
+            self._last_notified = None
+            self._notify_selection(self.current_row_idx, self.current_sample_idx)
+
     def can_advance_row(self, forward: bool) -> bool:
         if forward:
             if self.total_records_count is not None:
@@ -595,7 +631,10 @@ class VariantSplitView(Widget):
         if self.total_records_count is not None and target_row >= self.total_records_count:
             target_row = max(0, self.total_records_count - 1)
 
-        while len(self.records) <= target_row + 25:
+        if self.reader and self._is_main_stream_view and hasattr(self.reader, "set_focus_row"):
+            self.reader.set_focus_row(target_row)
+
+        while self._is_main_stream_view and len(self.records) <= target_row + 25:
             needed = max(100, target_row - len(self.records) + 50)
             if not self.fetch_more_rows(needed):
                 break
@@ -655,7 +694,7 @@ class VariantSplitView(Widget):
             records = self.reader.query_region(chrom, max(0, pos - 100000), pos + 100000, limit=self.window_size)
 
         if records:
-            self.set_records(records)
+            self.set_records(records, is_main_stream=False)
             return True
         return False
 
@@ -668,10 +707,20 @@ class VariantSplitView(Widget):
     def on_mount(self):
         self.rebuild_tables()
 
-    def set_records(self, records: List[VariantRecord]):
-        self.records = records
+    def set_records(self, records: List[VariantRecord], is_main_stream: bool = False):
+        self._is_main_stream_view = is_main_stream
+        self.records = list(records)
         self.current_row_idx = 0
         self.buffer_start = 0
+        if is_main_stream and self.reader:
+            if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
+                self.total_records_count = self.reader.get_total_variants_async()
+            elif hasattr(self.reader, "total_variants_ready") and self.reader.total_variants_ready:
+                self.total_records_count = self.reader.total_variants
+            else:
+                self.total_records_count = None
+        else:
+            self.total_records_count = len(self.records)
         self._ensure_row_capacity()
         self._update_all_rows_in_place()
         try:
@@ -679,6 +728,7 @@ class VariantSplitView(Widget):
             self.sample_table.scroll_to(y=0, animate=False, force=True)
         except Exception:
             pass
+        self._last_notified = None
         self._sync_both_tables_cursor(0, self.current_sample_idx)
         self._notify_selection(0, self.current_sample_idx)
 
@@ -772,11 +822,15 @@ class VariantSplitView(Widget):
 
     def _update_sample_row_cells(self, row_key: str, r: VariantRecord) -> None:
         visible = self.get_visible_samples()
+        samples_loaded = getattr(r, "samples_loaded", True)
         for j, s in enumerate(visible):
             col_k = f"col_{j}"
-            s_dict = r.sample_data.get(s, {})
-            raw_val = str(s_dict.get(self.format_tag, "."))
-            styled = self._style_sample_cell(raw_val, self.format_tag)
+            if not samples_loaded:
+                styled = Text("...", style="dim bright_black")
+            else:
+                s_dict = r.sample_data.get(s, {})
+                raw_val = str(s_dict.get(self.format_tag, "."))
+                styled = self._style_sample_cell(raw_val, self.format_tag)
             try:
                 self.sample_table.update_cell(row_key, col_k, styled)
             except Exception:
@@ -845,11 +899,15 @@ class VariantSplitView(Widget):
             self.sample_table.add_column(Text(s, style="bold bright_white"), key=f"col_{j}")
 
         for r_idx, r in enumerate(self.records):
+            samples_loaded = getattr(r, "samples_loaded", True)
             row_cells = []
             for s in visible:
-                s_dict = r.sample_data.get(s, {})
-                cell_val = str(s_dict.get(self.format_tag, "."))
-                row_cells.append(self._style_sample_cell(cell_val, self.format_tag))
+                if not samples_loaded:
+                    row_cells.append(Text("...", style="dim bright_black"))
+                else:
+                    s_dict = r.sample_data.get(s, {})
+                    cell_val = str(s_dict.get(self.format_tag, "."))
+                    row_cells.append(self._style_sample_cell(cell_val, self.format_tag))
             self.sample_table.add_row(*row_cells, key=f"row_{r_idx}")
 
     def _style_sample_cell(self, val: str, tag: str) -> Text:

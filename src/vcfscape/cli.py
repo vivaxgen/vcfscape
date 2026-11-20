@@ -6,6 +6,7 @@ import sys
 import os
 import click
 from vcfscape import __version__
+from vcfscape.core.vcf_reader import check_vcf_index_requirement, UnindexedLargeVcfError
 from vcfscape.ui.app import VcfscapeApp
 
 DEFAULT_DEMO_PATH = os.path.abspath(
@@ -87,6 +88,12 @@ def main(vcf_file, demo, cohorts, web, port, no_browser, token, no_token):
             sys.exit(1)
 
     if web:
+        if target_vcf:
+            try:
+                check_vcf_index_requirement(target_vcf)
+            except UnindexedLargeVcfError as exc:
+                click.echo(f"Error: {exc}", err=True)
+                sys.exit(1)
         from vcfscape.web_server import run_web_server
         run_web_server(
             port=port,
@@ -96,7 +103,8 @@ def main(vcf_file, demo, cohorts, web, port, no_browser, token, no_token):
             no_token=no_token,
         )
         return
-    else:
+
+    if not target_vcf:
         # Default to demo if no file provided
         search_paths = [
             DEFAULT_DEMO_PATH,
@@ -110,6 +118,13 @@ def main(vcf_file, demo, cohorts, web, port, no_browser, token, no_token):
         if not target_vcf:
             click.echo("Usage: vcfscape [VCF_FILE] or vcfscape --demo")
             sys.exit(1)
+
+    # Pre-open check: do not open VCF files > 100 MB without an index
+    try:
+        check_vcf_index_requirement(target_vcf)
+    except UnindexedLargeVcfError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
 
     app = VcfscapeApp(vcf_path=target_vcf)
     app.run()

@@ -8,7 +8,13 @@ import tempfile
 import unittest
 
 from vcfscape.core.indexer import SparseVcfIndex, RecordLruCache
-from vcfscape.core.vcf_reader import VcfReader, parse_vcf_line
+from vcfscape.core.vcf_reader import (
+    VcfReader,
+    parse_vcf_line,
+    parse_vcf_site_only,
+    check_vcf_index_requirement,
+    UnindexedLargeVcfError,
+)
 
 
 class TestVcfIndexing(unittest.TestCase):
@@ -147,6 +153,60 @@ class TestVcfIndexing(unittest.TestCase):
         self.assertEqual(total, 2500)
         self.assertTrue(reader.total_variants_ready)
         self.assertIn(2500, received_count)
+        reader.close()
+
+    def test_large_unindexed_vcf_guard_does_not_open_file(self):
+        """Files larger than threshold without an index must fail before opening."""
+        from unittest.mock import patch
+        import gzip
+
+        gz_path = os.path.join(self.temp_dir.name, "large_guard_test.vcf.gz")
+        with open(self.vcf_path, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+            f_out.writelines(f_in)
+
+        # File has no .tbi/.csi index; passing small threshold triggers >100MB guard cleanly
+        with patch("builtins.open", side_effect=AssertionError("VCF must not be opened")) as mock_open:
+            with self.assertRaises(UnindexedLargeVcfError) as ctx:
+                check_vcf_index_requirement(gz_path, max_unindexed_bytes=10)
+            mock_open.assert_not_called()
+
+        self.assertIn("tabix", ctx.exception.suggested_command)
+
+        # Creating a sibling .tbi file allows the pre-open check to pass
+        tbi_path = f"{gz_path}.tbi"
+        with open(tbi_path, "wb") as f:
+            f.write(b"TBI")
+        check_vcf_index_requirement(gz_path, max_unindexed_bytes=10)
+
+    def test_site_only_parsing_and_async_hydration(self):
+        """Site-only pipeline parses fixed fields quickly while Handle 2 hydrates samples asynchronously."""
+        site_rec = parse_vcf_site_only(
+            "Pf3D7_07_v3\t403625\tvar_crt\tG\tT\t99.0\tPASS\tGENE=crt\tGT:DP\t0/1:45\t1/1:60"
+        )
+        self.assertIsNotNone(site_rec)
+        self.assertFalse(site_rec.samples_loaded)
+        self.assertEqual(site_rec.sample_data, {})
+        self.assertEqual(site_rec.chrom, "Pf3D7_07_v3")
+        self.assertEqual(site_rec.pos, 403625)
+
+        reader = VcfReader(self.vcf_path, lazy=True)
+        try:
+            placeholder_or_hydrated = reader.get_slice(offset=500, limit=10, allow_placeholder=True)
+            self.assertEqual(len(placeholder_or_hydrated), 10)
+            self.assertEqual(placeholder_or_hydrated[0].var_id, "var_500")
+
+            # Wait briefly for Handle 2 priority hydration to populate cache
+            deadline = time.time() + 2.0
+            hydrated = reader.get_hydrated_record(500)
+            while hydrated and not hydrated.samples_loaded and time.time() < deadline:
+                time.sleep(0.02)
+                hydrated = reader.get_hydrated_record(500)
+
+            self.assertIsNotNone(hydrated)
+            self.assertTrue(hydrated.samples_loaded)
+            self.assertEqual(len(hydrated.sample_data), 20)
+        finally:
+            reader.close()
 
 
 if __name__ == "__main__":

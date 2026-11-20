@@ -1,6 +1,0 @@
-{
-  "summary":  "Plan to eliminate vertical scrolling cursor oscillation, sync drifting, and flickering in Textual TUI by implementing a single-source-of-truth master-slave synchronization architecture with unified vertical scroll management and atomic row batching.",
-  "updatedAt":  "2026-11-08T23:18:08.480446296Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

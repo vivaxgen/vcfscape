@@ -31,10 +31,12 @@ class CellInspector(Widget):
         super().__init__(**kwargs)
         self.sample_id: Optional[str] = None
         self.sample_fields: Dict[str, Any] = {}
+        self.loading: bool = False
 
-    def update_cell(self, sample_id: Optional[str], sample_fields: Dict[str, Any]):
+    def update_cell(self, sample_id: Optional[str], sample_fields: Dict[str, Any], loading: bool = False):
         self.sample_id = sample_id
         self.sample_fields = sample_fields
+        self.loading = loading
         self.refresh()
 
     def render(self) -> Text:
@@ -46,6 +48,10 @@ class CellInspector(Widget):
 
         text.append(" CELL INSPECTOR ", style="bold black on bright_yellow")
         text.append(f" [{self.sample_id}]\n", style="bold white")
+
+        if self.loading:
+            text.append("Hydrating sample genotype...", style="dim italic bright_cyan")
+            return text
 
         gt = str(self.sample_fields.get("GT", "./."))
         gt_desc = ""
@@ -182,8 +188,11 @@ class SidebarPanel(Container):
 
     def update_selection(self, record: VariantRecord, sample_id: Optional[str] = None):
         self.variant_summary.update_record(record)
-        if sample_id:
+        is_loaded = getattr(record, "samples_loaded", True)
+        if sample_id and not is_loaded:
+            self.cell_inspector.update_cell(sample_id, {}, loading=True)
+        elif sample_id:
             s_data = record.sample_data.get(sample_id, {})
-            self.cell_inspector.update_cell(sample_id, s_data)
+            self.cell_inspector.update_cell(sample_id, s_data, loading=False)
         else:
-            self.cell_inspector.update_cell(None, {})
+            self.cell_inspector.update_cell(None, {}, loading=False)

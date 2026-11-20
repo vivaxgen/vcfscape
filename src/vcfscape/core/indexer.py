@@ -79,19 +79,45 @@ class SparseVcfIndex:
 
         self._load_or_build()
 
-    def _get_candidate_cache_paths(self) -> List[str]:
-        dir_name = os.path.dirname(self.filepath)
-        base_name = os.path.basename(self.filepath)
+    @staticmethod
+    def candidate_cache_paths(filepath: str) -> List[str]:
+        abs_path = os.path.abspath(filepath)
+        dir_name = os.path.dirname(abs_path)
+        base_name = os.path.basename(abs_path)
         primary = os.path.join(dir_name, f".{base_name}.vcfscape.idx")
         paths = [primary]
         try:
             import hashlib
             cache_dir = os.path.expanduser("~/.cache/vcfscape")
-            h = hashlib.sha256(os.path.abspath(self.filepath).encode("utf-8")).hexdigest()[:16]
+            h = hashlib.sha256(abs_path.encode("utf-8")).hexdigest()[:16]
             paths.append(os.path.join(cache_dir, f"{base_name}_{h}.idx"))
         except Exception:
             pass
         return paths
+
+    @staticmethod
+    def has_cached_index(filepath: str, step: int = 200) -> bool:
+        """Verify if a valid sparse index cache exists without opening the VCF file."""
+        try:
+            file_mtime = os.path.getmtime(filepath)
+            file_size = os.path.getsize(filepath)
+        except OSError:
+            return False
+
+        for cache_path in SparseVcfIndex.candidate_cache_paths(filepath):
+            if os.path.exists(cache_path):
+                try:
+                    if os.path.getmtime(cache_path) >= file_mtime:
+                        with open(cache_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if data.get("file_size") == file_size and data.get("step") == step:
+                            return True
+                except Exception:
+                    pass
+        return False
+
+    def _get_candidate_cache_paths(self) -> List[str]:
+        return self.candidate_cache_paths(self.filepath)
 
     def _index_cache_path(self) -> str:
         paths = self._get_candidate_cache_paths()
@@ -323,28 +349,37 @@ class SparseVcfIndex:
 
 
 class RecordLruCache:
-    """Thread-safe and fast in-memory LRU cache for parsed VariantRecord objects."""
+    """Thread-safe and fast in-memory LRU cache for parsed VariantRecord / sample payload objects."""
 
     def __init__(self, maxsize: int = 3000):
         self.maxsize = maxsize
         self._cache: OrderedDict[int, Any] = OrderedDict()
+        self._lock = threading.RLock()
+
+    def contains(self, key: int) -> bool:
+        with self._lock:
+            return key in self._cache
 
     def get(self, key: int) -> Optional[Any]:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            return self._cache[key]
-        return None
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
 
     def put(self, key: int, val: Any) -> None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        else:
-            if len(self._cache) >= self.maxsize:
-                self._cache.popitem(last=False)
-        self._cache[key] = val
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self.maxsize:
+                    self._cache.popitem(last=False)
+            self._cache[key] = val
 
     def clear(self):
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     def __len__(self):
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
