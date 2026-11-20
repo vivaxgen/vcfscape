@@ -3,10 +3,12 @@ Main Textual Application for VCFscape - VCF inspector part of vivaxGEN Project.
 """
 
 import os
+import threading
 from typing import Optional, List
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual.binding import Binding
+from textual.screen import Screen
 
 from vcfscape.core.vcf_reader import VcfReader, VariantRecord
 from vcfscape.core.cohorts import CohortManager
@@ -18,6 +20,36 @@ from vcfscape.ui.widgets.footer_bar import FooterBar
 from vcfscape.ui.screens.cohort_manager_screen import CohortManagerScreen
 from vcfscape.ui.screens.jump_region_screen import JumpRegionScreen
 from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen
+
+
+class MainScreen(Screen):
+    """Explicit root workspace screen always anchored at the base of screen_stack."""
+
+    def __init__(self, app_ref: "VcfscapeApp", **kwargs):
+        super().__init__(**kwargs)
+        self._app_ref = app_ref
+
+    def compose(self) -> ComposeResult:
+        yield self._app_ref.header_bar
+        with Horizontal(id="main_container"):
+            yield self._app_ref.table_widget
+            yield self._app_ref.sidebar_panel
+        yield self._app_ref.stats_pane
+        yield self._app_ref.footer_bar
+
+    def on_mount(self) -> None:
+        self._app_ref._on_main_screen_mounted()
+
+    def on_screen_resume(self) -> None:
+        """Restore focus and layout whenever a modal screen dismisses back to MainScreen."""
+        try:
+            self._app_ref.table_widget.focus()
+        except Exception:
+            pass
+        try:
+            self.refresh(layout=True)
+        except Exception:
+            pass
 
 
 class VcfscapeApp(App):
@@ -55,6 +87,9 @@ class VcfscapeApp(App):
         self.cohort_manager = CohortManager(self.reader.samples)
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
         self.loading_screen: Optional[VcfLoadingScreen] = None
+        self._closing = False
+        self._main_screen: Optional[MainScreen] = None
+        self._callbacks_hooked = False
 
         # Widgets
         provisional_variants = self.reader.get_total_variants_async()
@@ -80,83 +115,125 @@ class VcfscapeApp(App):
         self.stats_pane = CohortStatsPane(self.cohort_manager)
         self.footer_bar = FooterBar()
 
-        # Hook async sample hydration callback from Handle 2
+    def get_default_screen(self) -> Screen:
+        """Install explicit MainScreen as the permanent base of screen_stack."""
+        if self._main_screen is None:
+            self._main_screen = MainScreen(self, id="main_screen")
+        return self._main_screen
+
+    def _hook_reader_callbacks(self) -> None:
+        if self._callbacks_hooked:
+            return
+        self._callbacks_hooked = True
         if hasattr(self.reader, "add_hydration_callback"):
             self.reader.add_hydration_callback(self._on_samples_hydrated)
-
-        # If counting in background, hook progress and completion callbacks
         if not self.reader.total_variants_ready:
             self.reader.add_progress_callback(self._on_progress_update)
             self.reader.add_total_variants_callback(self._on_total_variants_ready)
 
-    def on_mount(self) -> None:
-        if not self.reader.total_variants_ready:
-            def _on_loading_dismiss(_result=None):
-                try:
-                    self.table_widget.focus()
-                except Exception:
-                    pass
+    def _on_main_screen_mounted(self) -> None:
+        """Called after MainScreen and all child widgets have mounted."""
+        self._hook_reader_callbacks()
+        try:
+            self.table_widget.focus()
+        except Exception:
+            pass
 
-            self.loading_screen = VcfLoadingScreen(os.path.basename(self.vcf_path))
-            self.push_screen(self.loading_screen, _on_loading_dismiss)
-        else:
-            try:
-                self.table_widget.focus()
-            except Exception:
-                pass
         # Reconcile any rows hydrated before UI loop mounted
         if hasattr(self.table_widget, "hydrate_rows") and self.table_widget.records:
             self.table_widget.hydrate_rows(list(range(len(self.table_widget.records))))
 
+        if not self.reader.total_variants_ready:
+            def _push_loading_modal() -> None:
+                if self._closing or self.reader.total_variants_ready:
+                    total = self.reader.get_total_variants_async()
+                    if total is not None:
+                        self._apply_total_variants(total)
+                    return
+
+                def _on_loading_dismiss(_result=None):
+                    self.loading_screen = None
+                    try:
+                        self.table_widget.focus()
+                    except Exception:
+                        pass
+                    if self._main_screen is not None:
+                        try:
+                            self._main_screen.refresh(layout=True)
+                        except Exception:
+                            pass
+
+                self.loading_screen = VcfLoadingScreen(os.path.basename(self.vcf_path))
+                self.push_screen(self.loading_screen, _on_loading_dismiss)
+
+                # Re-check in case worker completed right as modal was pushed
+                if self.reader.total_variants_ready:
+                    total = self.reader.get_total_variants_async()
+                    if total is not None:
+                        self._apply_total_variants(total)
+
+            try:
+                self.call_after_refresh(_push_loading_modal)
+            except Exception:
+                _push_loading_modal()
+
     def on_unmount(self) -> None:
+        self._closing = True
         if hasattr(self.reader, "close"):
             self.reader.close()
 
-    def _on_samples_hydrated(self, indices: List[int]) -> None:
+    def action_quit(self) -> None:
+        self._closing = True
+        if hasattr(self.reader, "close"):
+            self.reader.close()
+        self.exit()
+
+    def _invoke_on_ui(self, fn, *args) -> None:
+        if self._closing or not getattr(self, "is_running", False):
+            return
         try:
-            self.call_from_thread(self._apply_samples_hydrated, indices)
+            if threading.get_ident() == getattr(self, "_thread_id", None):
+                fn(*args)
+            else:
+                self.call_from_thread(fn, *args)
         except Exception:
             pass
 
+    def _on_samples_hydrated(self, indices: List[int]) -> None:
+        self._invoke_on_ui(self._apply_samples_hydrated, indices)
+
     def _apply_samples_hydrated(self, indices: List[int]) -> None:
+        if self._closing:
+            return
         if hasattr(self, "table_widget") and hasattr(self.table_widget, "hydrate_rows"):
             self.table_widget.hydrate_rows(indices)
 
     def _on_progress_update(self, count: int) -> None:
-        try:
-            self.call_from_thread(self._apply_progress_update, count)
-        except Exception:
-            pass
+        self._invoke_on_ui(self._apply_progress_update, count)
 
     def _apply_progress_update(self, count: int) -> None:
+        if self._closing:
+            return
         if self.loading_screen is not None:
             self.loading_screen.update_progress(count)
 
     def _on_total_variants_ready(self, total: int):
-        try:
-            self.call_from_thread(self._apply_total_variants, total)
-        except Exception:
-            pass
+        self._invoke_on_ui(self._apply_total_variants, total)
 
     def _apply_total_variants(self, total: int):
+        if self._closing:
+            return
         self.header_bar.total_variants = total
         self.table_widget.update_total_variants(total)
         if self.loading_screen is not None:
-            self.loading_screen.mark_complete(total)
+            modal = self.loading_screen
             self.loading_screen = None
+            modal.mark_complete(total)
         try:
             self.table_widget.focus()
         except Exception:
             pass
         self.footer_bar.set_log(f"VCF file indexing complete: {total:,} total variants.")
-
-    def compose(self) -> ComposeResult:
-        yield self.header_bar
-        with Horizontal(id="main_container"):
-            yield self.table_widget
-            yield self.sidebar_panel
-        yield self.stats_pane
-        yield self.footer_bar
 
     def on_variant_split_view_variant_selected(self, message: VariantSplitView.VariantSelected):
         """Update sidebar and split-pane when user moves cursor."""

@@ -1319,5 +1319,8 @@ class VcfReader:
 
     def close(self) -> None:
         self._stop_workers = True
+        self._progress_callbacks.clear()
+        self._count_callbacks.clear()
+        self._hydration_callbacks.clear()
         with self._sample_cond:
             self._sample_cond.notify_all()

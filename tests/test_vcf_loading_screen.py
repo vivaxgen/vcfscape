@@ -79,6 +79,39 @@ class TestVcfLoadingScreen(unittest.TestCase):
         screen.action_dismiss_screen()
         # Verify dismissal was invoked without errors
 
+    def test_idempotent_dismiss_and_root_stack_guard(self):
+        screen = VcfLoadingScreen(filename="cohort_malaria.vcf.gz")
+        dismiss_calls = []
+        screen.dismiss = lambda result=None: dismiss_calls.append(result)
+
+        # Calling Esc then mark_complete should only dismiss once
+        screen.update_progress(250)
+        screen.action_dismiss_screen()
+        screen.mark_complete(500)
+        self.assertEqual(dismiss_calls, [250])
+
+        # Root stack guard: if screen_stack has only 1 screen, _safe_dismiss must not dismiss
+        dismiss_calls_2 = []
+        fake_app = type("FakeApp", (), {"screen_stack": [object()], "screen": None})()
+
+        class GuardedScreen(VcfLoadingScreen):
+            @property
+            def app(self):
+                return fake_app
+
+        screen3 = GuardedScreen(filename="cohort_malaria.vcf.gz")
+        fake_app.screen = screen3
+        screen3.dismiss = lambda result=None: dismiss_calls_2.append(result)
+        screen3.action_dismiss_screen()
+        self.assertEqual(dismiss_calls_2, [])
+        self.assertFalse(screen3._dismiss_requested)
+
+        # When modal sits above MainScreen (len(screen_stack) == 2), it dismisses cleanly once
+        fake_app.screen_stack = [object(), screen3]
+        screen3.mark_complete(500)
+        self.assertEqual(dismiss_calls_2, [500])
+        self.assertTrue(screen3._dismiss_requested)
+
     def test_vcf_reader_progress_callbacks(self):
         from vcfscape.core.vcf_reader import VcfReader
         import tempfile

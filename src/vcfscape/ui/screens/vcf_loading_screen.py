@@ -28,6 +28,14 @@ class AnimatedSpinner(Static):
         self.update_spinner()
         self._timer = self.set_interval(0.08, self.update_spinner)
 
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            try:
+                self._timer.stop()
+            except Exception:
+                pass
+            self._timer = None
+
     def update_spinner(self) -> None:
         frame = SPINNER_FRAMES[self._frame_idx % len(SPINNER_FRAMES)]
         self._frame_idx += 1
@@ -113,6 +121,7 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
         self.filename = filename
         self.is_completed = False
         self._current_count: int = 0
+        self._dismiss_requested = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="loading_dialog"):
@@ -125,6 +134,33 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
             yield Static("Please wait while records are indexed...", id="hint_label")
             with Horizontal(id="btn_container"):
                 yield Button("Continue in Background (Esc)", id="btn_dismiss", variant="primary")
+
+    def on_mount(self) -> None:
+        if self.is_completed:
+            self._safe_dismiss(self._current_count)
+
+    def _safe_dismiss(self, result: Optional[int]) -> None:
+        """Idempotently dismiss this modal only once while it sits above a root screen."""
+        if self._dismiss_requested:
+            return
+        try:
+            app_obj = self.app
+        except Exception:
+            app_obj = None
+
+        if app_obj is not None:
+            stack = getattr(app_obj, "screen_stack", None)
+            if stack is not None:
+                if len(stack) <= 1:
+                    return
+                if getattr(app_obj, "screen", None) is not self:
+                    return
+
+        self._dismiss_requested = True
+        try:
+            self.dismiss(result)
+        except Exception:
+            pass
 
     def update_progress(self, count: int) -> None:
         """Called periodically as records are scanned in the background."""
@@ -146,17 +182,11 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
             status.update(Text("Index and records ready", style="bold green"))
         except Exception:
             pass
-        # Auto-dismiss modal
-        try:
-            self.dismiss(total)
-        except Exception:
-            pass
+        # Auto-dismiss modal safely once
+        self._safe_dismiss(total)
 
     def action_dismiss_screen(self) -> None:
-        try:
-            self.dismiss(self._current_count)
-        except Exception:
-            pass
+        self._safe_dismiss(self._current_count)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_dismiss":
