@@ -189,7 +189,8 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("q")
             await pilot.pause()
-            self.assertTrue(app._closing)
+            self.assertTrue(app._vcfscape_closing)
+        self.assertFalse(app.is_running)
 
     async def test_demo_ctrl_c_exit(self):
         app = VcfscapeApp(DEMO_VCF)
@@ -197,7 +198,8 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press("ctrl+c")
             await pilot.pause()
-            self.assertTrue(app._closing)
+            self.assertTrue(app._vcfscape_closing)
+        self.assertFalse(app.is_running)
 
 
 class TestWidgetFilesPresence(unittest.TestCase):

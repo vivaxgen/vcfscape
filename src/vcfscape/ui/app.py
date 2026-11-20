@@ -97,7 +97,7 @@ class VcfscapeApp(App):
         self.cohort_manager = CohortManager(self.reader.samples)
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
         self.loading_screen: Optional[VcfLoadingScreen] = None
-        self._closing = False
+        self._vcfscape_closing = False
         self._main_screen: Optional[MainScreen] = None
         self._callbacks_hooked = False
         self._pending_hydrated_indices: Set[int] = set()
@@ -166,7 +166,7 @@ class VcfscapeApp(App):
 
         if not self.reader.total_variants_ready:
             def _push_loading_modal() -> None:
-                if self._closing or self.reader.total_variants_ready:
+                if self._vcfscape_closing or self.reader.total_variants_ready:
                     total = self.reader.get_total_variants_async()
                     if total is not None:
                         self._apply_total_variants(total)
@@ -207,7 +207,7 @@ class VcfscapeApp(App):
             self._hydration_timer = None
 
     def on_unmount(self) -> None:
-        self._closing = True
+        self._vcfscape_closing = True
         self._stop_hydration_timer()
         if hasattr(self.reader, "close"):
             self.reader.close()
@@ -216,12 +216,17 @@ class VcfscapeApp(App):
         if event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
-            self._closing = True
+            self._vcfscape_closing = True
             self._stop_hydration_timer()
+            if hasattr(self.reader, "_stop_event"):
+                try:
+                    self.reader._stop_event.set()
+                except Exception:
+                    pass
             self.exit()
 
     async def action_quit(self) -> None:
-        self._closing = True
+        self._vcfscape_closing = True
         self._stop_hydration_timer()
         if hasattr(self.reader, "_stop_event"):
             try:
@@ -247,7 +252,7 @@ class VcfscapeApp(App):
                 pass
 
     def _invoke_on_ui(self, fn, *args) -> None:
-        if self._closing or not getattr(self, "is_running", False):
+        if self._vcfscape_closing or not getattr(self, "is_running", False):
             return
         try:
             if threading.get_ident() == getattr(self, "_thread_id", None):
@@ -261,7 +266,7 @@ class VcfscapeApp(App):
         self._invoke_on_ui(self._apply_samples_hydrated, indices)
 
     def _apply_samples_hydrated(self, indices: List[int]) -> None:
-        if self._closing or not indices:
+        if self._vcfscape_closing or not indices:
             return
         self._pending_hydrated_indices.update(indices)
         if self._hydration_timer is None:
@@ -272,7 +277,7 @@ class VcfscapeApp(App):
 
     def _flush_hydrated_rows(self) -> None:
         self._hydration_timer = None
-        if self._closing or not self._pending_hydrated_indices:
+        if self._vcfscape_closing or not self._pending_hydrated_indices:
             return
         batch = sorted(self._pending_hydrated_indices)
         self._pending_hydrated_indices.clear()
@@ -283,7 +288,7 @@ class VcfscapeApp(App):
         self._invoke_on_ui(self._apply_progress_update, count)
 
     def _apply_progress_update(self, count: int) -> None:
-        if self._closing:
+        if self._vcfscape_closing:
             return
         if self.loading_screen is not None:
             self.loading_screen.update_progress(count)
@@ -292,7 +297,7 @@ class VcfscapeApp(App):
         self._invoke_on_ui(self._apply_total_variants, total)
 
     def _apply_total_variants(self, total: int):
-        if self._closing:
+        if self._vcfscape_closing:
             return
         self.header_bar.total_variants = total
         self.table_widget.update_total_variants(total)
