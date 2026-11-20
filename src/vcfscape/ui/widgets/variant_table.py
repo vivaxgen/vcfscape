@@ -157,6 +157,11 @@ def _rebuild_table_columns(table: FastDataTable, new_backend: Any, column_labels
         for idx, k in enumerate(new_keys):
             locs[k] = idx
 
+    if isinstance(getattr(table, "_ordered_columns", None), list):
+        table._ordered_columns = [new_cols_dict[k] for k in new_keys]
+    if isinstance(getattr(table, "_ordered_column_keys", None), list):
+        table._ordered_column_keys = list(new_keys)
+
 
 def _invoke_optional(fn: Any) -> None:
     if not callable(fn):
@@ -181,7 +186,7 @@ def _apply_arrow_backend_to_table(
     new_backend: Any,
     column_labels: Optional[List[str]] = None,
 ) -> None:
-    """Swap buffered ArrowBackend safely on a FastDataTable without corrupting instance state."""
+    """Swap buffered ArrowBackend safely on a FastDataTable without corrupting internal layout state."""
     if new_backend is None:
         return
 
@@ -190,8 +195,10 @@ def _apply_arrow_backend_to_table(
         if pa_tbl is not None and hasattr(pa_tbl, "column_names"):
             column_labels = list(pa_tbl.column_names)
 
+    used_native_setter = False
     if hasattr(table, "set_backend"):
         table.set_backend(new_backend)
+        used_native_setter = True
     else:
         try:
             ordered = getattr(table, "ordered_columns", None)
@@ -211,36 +218,31 @@ def _apply_arrow_backend_to_table(
                 table._column_labels = list(column_labels)
             _rebuild_table_columns(table, new_backend, column_labels)
 
-    for cls in type(table).__mro__:
-        for prop_name, prop_obj in cls.__dict__.items():
-            if isinstance(prop_obj, cached_property):
-                table.__dict__.pop(prop_name, None)
+        for cls in type(table).__mro__:
+            for prop_name, prop_obj in cls.__dict__.items():
+                if isinstance(prop_obj, cached_property):
+                    table.__dict__.pop(prop_name, None)
 
-    # Reset nullable cache attributes without deleting them from __dict__
-    for attr_name in ("_ordered_columns", "_ordered_column_keys", "_ordered_rows"):
-        if hasattr(table, "__dict__") and attr_name in table.__dict__:
-            setattr(table, attr_name, None)
+        for cache_attr in (
+            "_row_cache",
+            "_line_cache",
+            "_row_render_cache",
+            "_cell_render_cache",
+            "_cell_widths",
+            "_styled_cell_cache",
+            "_updated_cells",
+        ):
+            cache_obj = getattr(table, cache_attr, None)
+            if hasattr(cache_obj, "clear"):
+                cache_obj.clear()
 
-    for cache_attr in (
-        "_row_cache",
-        "_line_cache",
-        "_row_render_cache",
-        "_cell_render_cache",
-        "_cell_widths",
-        "_styled_cell_cache",
-        "_updated_cells",
-    ):
-        cache_obj = getattr(table, cache_attr, None)
-        if hasattr(cache_obj, "clear"):
-            cache_obj.clear()
-
-    for method_name in (
-        "_reset_render_caches",
-        "_clear_caches",
-        "_update_column_widths",
-        "_update_dimensions",
-    ):
-        _invoke_optional(getattr(table, method_name, None))
+        for method_name in (
+            "_reset_render_caches",
+            "_clear_caches",
+            "_update_column_widths",
+            "_update_dimensions",
+        ):
+            _invoke_optional(getattr(table, method_name, None))
 
     new_row_count = int(getattr(new_backend, "row_count", 0))
     new_col_count = int(getattr(new_backend, "column_count", len(column_labels or [])))
@@ -255,34 +257,11 @@ def _apply_arrow_backend_to_table(
             except Exception:
                 pass
 
-    try:
-        hdr_h = getattr(table, "header_height", 1) if getattr(table, "show_header", True) else 0
-        expected_h = new_row_count + hdr_h
-        ordered_cols = getattr(table, "ordered_columns", None)
-        if ordered_cols is not None:
-            pad = int(getattr(table, "cell_padding", 1)) * 2
-            expected_w = sum(
-                c.get_render_width(table)
-                if hasattr(c, "get_render_width")
-                else max(4, int(getattr(c, "width", 0) or (getattr(c, "content_width", 0) + pad) or 8))
-                for c in ordered_cols
-            )
-        else:
-            expected_w = table.virtual_size.width
-        cur_vs = getattr(table, "virtual_size", None)
-        if cur_vs is not None and (cur_vs.height != expected_h or (expected_w > 0 and cur_vs.width != expected_w)):
-            table.virtual_size = Size(max(1, expected_w), max(1, expected_h))
-        vp_h = max(1, getattr(getattr(table, "size", None), "height", 1))
-        max_y = max(0, expected_h - vp_h)
-        if getattr(table, "scroll_y", 0) > max_y:
-            table.scroll_to(y=max_y, animate=False, force=True)
-    except Exception:
-        pass
-
-    try:
-        table.refresh(layout=True)
-    except Exception:
-        pass
+    if not used_native_setter:
+        try:
+            table.refresh()
+        except Exception:
+            pass
 
 
 class _PassiveSplitTable(FastDataTable):
@@ -346,7 +325,7 @@ class SampleMatrixTable(_PassiveSplitTable):
     pass
 
 
-class VariantSplitView(Widget):
+class VariantSplitView(Horizontal):
     """
     Top-level Split Table Controller backed by Dual PyArrow ArrowBackends:
     - Holds focus (`can_focus=True`) and captures Up/Down/PageUp/PageDown/Left/Right/Home/End
@@ -372,20 +351,12 @@ class VariantSplitView(Widget):
     VariantSplitView {
         width: 1fr;
         height: 1fr;
-        layout: horizontal;
-    }
-
-    #split_container {
-        width: 1fr;
-        height: 100%;
-        layout: horizontal;
     }
 
     #fixed_table {
         height: 100%;
         background: #0b0f17;
         scrollbar-size-vertical: 0;
-        overflow-y: auto;
     }
 
     #table_divider {
@@ -487,10 +458,9 @@ class VariantSplitView(Widget):
         self.sample_table.split_view = self
 
     def compose(self):
-        with Horizontal(id="split_container"):
-            yield self.fixed_table
-            yield self.divider
-            yield self.sample_table
+        yield self.fixed_table
+        yield self.divider
+        yield self.sample_table
 
     def on_mount(self):
         if getattr(self.fixed_table, "backend", None) is None or getattr(self.sample_table, "backend", None) is None:
@@ -1004,7 +974,7 @@ class VariantSplitView(Widget):
         hydrated_map: Dict[int, VariantRecord] = {}
         updated_current = False
         for idx in row_indices:
-            if 0 <= idx < len(self.records):
+            if 0 <= idx < len(self.records) and not self.sample_buffer.is_row_hydrated(idx):
                 hydrated = self.reader.get_hydrated_record(idx)
                 if hydrated is not None and getattr(hydrated, "samples_loaded", False):
                     self.records[idx] = hydrated

@@ -159,6 +159,47 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertEqual(children, ["CohortListWidget", "VariantSummary", "CellInspector"])
 
 
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow not installed in this environment")
+class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
+    """Headless Textual pilot tests verifying MainScreen responsiveness, navigation, and exit."""
+
+    async def test_demo_startup_navigation_and_q_exit(self):
+        app = VcfscapeApp(DEMO_VCF)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 1)
+            self.assertIs(app.focused, app.table_widget)
+
+            await pilot.press("down")
+            await pilot.pause()
+            self.assertEqual(app.table_widget.current_row_idx, 1)
+
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(app.table_widget.current_sample_idx, 1)
+
+            await pilot.press("left", "up")
+            await pilot.pause()
+            self.assertEqual(app.table_widget.current_row_idx, 0)
+            self.assertEqual(app.table_widget.current_sample_idx, 0)
+
+            await pilot.press("pagedown")
+            await pilot.pause()
+            self.assertGreater(app.table_widget.current_row_idx, 0)
+
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app._closing)
+
+    async def test_demo_ctrl_c_exit(self):
+        app = VcfscapeApp(DEMO_VCF)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            self.assertTrue(app._closing)
+
+
 class TestWidgetFilesPresence(unittest.TestCase):
     """Verifies that all widget files and assets exist and compile without syntax errors."""
 

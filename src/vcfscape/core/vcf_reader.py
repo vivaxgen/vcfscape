@@ -579,7 +579,12 @@ class VcfReader:
 
         # 2. Setup Sparse Index for uncompressed plain .vcf files
         if not self.is_gzipped and not self.is_bcf:
-            if lazy:
+            try:
+                small_file = os.path.getsize(self.filepath) <= 256 * 1024
+            except OSError:
+                small_file = False
+            use_async_idx = bool(lazy and not small_file)
+            if use_async_idx:
                 self._sparse_index = SparseVcfIndex(
                     self.filepath,
                     build_async=True,
@@ -597,7 +602,7 @@ class VcfReader:
                 )
                 self._total_variants_count = self._sparse_index.total_records
 
-        # 3. Start Minimal Handle 1 + Viewport-Only Handle 2
+        # 3. Start Minimal Handle 1 + Viewport-Only Handle 2 (skip Handle 2 thread for tiny preloaded files)
         self._start_dual_pipelines(lazy=lazy)
 
         # 4. Eagerly hydrate small datasets or when lazy=False
@@ -735,7 +740,10 @@ class VcfReader:
         else:
             self._start_fallback_site_worker(initial_batch, lazy=lazy)
 
-        if lazy and self.samples:
+        small_preloaded = (
+            self._total_variants_count is not None and self._total_variants_count <= 500
+        )
+        if lazy and self.samples and not small_preloaded:
             self._start_sample_hydration_worker()
 
     def _start_cyvcf2_site_worker(self, site_vcf: Any) -> None:

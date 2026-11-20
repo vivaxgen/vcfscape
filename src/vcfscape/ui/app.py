@@ -27,6 +27,12 @@ from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen
 class MainScreen(Screen):
     """Explicit root workspace screen always anchored at the base of screen_stack."""
 
+    BINDINGS = [
+        Binding("q", "app.quit", "Quit", show=False),
+        Binding("ctrl+c", "app.quit", "Quit", show=False, priority=True),
+        Binding("ctrl+z", "app.suspend_process", "Suspend", show=False, priority=True),
+    ]
+
     def __init__(self, app_ref: "VcfscapeApp", **kwargs):
         super().__init__(**kwargs)
         self._app_ref = app_ref
@@ -124,7 +130,7 @@ class VcfscapeApp(App):
     def get_default_screen(self) -> Screen:
         """Install explicit MainScreen as the permanent base of screen_stack."""
         if self._main_screen is None:
-            self._main_screen = MainScreen(self, id="main_screen")
+            self._main_screen = MainScreen(self, id="_default")
         return self._main_screen
 
     def _hook_reader_callbacks(self) -> None:
@@ -145,9 +151,18 @@ class VcfscapeApp(App):
         except Exception:
             pass
 
-        # Reconcile any rows hydrated before UI loop mounted
+        # Reconcile only rows not yet hydrated in SampleArrowBuffer
         if hasattr(self.table_widget, "hydrate_rows") and self.table_widget.records:
-            self.table_widget.hydrate_rows(list(range(len(self.table_widget.records))))
+            buf = getattr(self.table_widget, "sample_buffer", None)
+            if buf is not None and hasattr(buf, "is_row_hydrated"):
+                pending = [
+                    i for i in range(len(self.table_widget.records))
+                    if not buf.is_row_hydrated(i)
+                ]
+            else:
+                pending = list(range(len(self.table_widget.records)))
+            if pending:
+                self.table_widget.hydrate_rows(pending)
 
         if not self.reader.total_variants_ready:
             def _push_loading_modal() -> None:
@@ -201,13 +216,18 @@ class VcfscapeApp(App):
         if event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
-            self.action_quit()
+            self._closing = True
+            self._stop_hydration_timer()
+            self.exit()
 
-    def action_quit(self) -> None:
+    async def action_quit(self) -> None:
         self._closing = True
         self._stop_hydration_timer()
-        if hasattr(self.reader, "close"):
-            self.reader.close()
+        if hasattr(self.reader, "_stop_event"):
+            try:
+                self.reader._stop_event.set()
+            except Exception:
+                pass
         self.exit()
 
     def action_suspend_process(self) -> None:

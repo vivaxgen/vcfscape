@@ -186,6 +186,7 @@ class SampleArrowBuffer:
         resolved = samples if samples is not None else visible_samples
         self.visible_samples: List[str] = list(resolved or [])
         self._row_count: int = 0
+        self._hydrated_rows: set[int] = set()
         self._tag_columns: Dict[str, Dict[str, List[str]]] = {
             tag: {s: [] for s in self.visible_samples}
             for tag in SAMPLE_FORMAT_TAGS
@@ -202,6 +203,9 @@ class SampleArrowBuffer:
     @property
     def row_count(self) -> int:
         return self._row_count
+
+    def is_row_hydrated(self, row_idx: int) -> bool:
+        return row_idx in self._hydrated_rows
 
     def _extract_row_sample_values(self, rec: VariantRecord, tag: str) -> List[str]:
         if not getattr(rec, "samples_loaded", True):
@@ -222,6 +226,7 @@ class SampleArrowBuffer:
         if resolved is not None:
             self.visible_samples = list(resolved)
         self._row_count = 0
+        self._hydrated_rows.clear()
         self._tag_columns = {
             tag: {s: [] for s in self.visible_samples}
             for tag in SAMPLE_FORMAT_TAGS
@@ -244,14 +249,16 @@ class SampleArrowBuffer:
                 tag_cols = self._tag_columns[tag]
                 for idx, s in enumerate(self.visible_samples):
                     tag_cols[s].append(vals[idx])
+            if getattr(rec, "samples_loaded", True):
+                self._hydrated_rows.add(self._row_count)
             self._row_count += 1
         self._dirty_tags.update(SAMPLE_FORMAT_TAGS)
 
     def hydrate_rows(self, row_indices: List[int], records_by_idx: Dict[int, VariantRecord]) -> bool:
-        """Patch hydrated sample rows cleanly across all FORMAT tag columns."""
+        """Patch newly hydrated sample rows cleanly across all FORMAT tag columns."""
         updated = False
         for row_idx in row_indices:
-            if not (0 <= row_idx < self._row_count):
+            if not (0 <= row_idx < self._row_count) or row_idx in self._hydrated_rows:
                 continue
             rec = records_by_idx.get(row_idx)
             if rec is None or not getattr(rec, "samples_loaded", False):
@@ -261,6 +268,7 @@ class SampleArrowBuffer:
                 tag_cols = self._tag_columns[tag]
                 for col_idx, s in enumerate(self.visible_samples):
                     tag_cols[s][row_idx] = vals[col_idx]
+            self._hydrated_rows.add(row_idx)
             updated = True
         if updated:
             self._dirty_tags.update(SAMPLE_FORMAT_TAGS)

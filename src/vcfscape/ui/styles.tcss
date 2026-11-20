@@ -24,18 +24,11 @@ VariantSplitView {
     layout: horizontal;
 }
 
-#split_container {
-    width: 1fr;
-    height: 100%;
-    layout: horizontal;
-}
-
 FixedVariantTable,
 #fixed_table {
     height: 100%;
     background: #0b0f17;
     scrollbar-size-vertical: 0;
-    overflow-y: auto;
 }
 
 #table_divider {

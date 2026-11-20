@@ -193,9 +193,11 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
     def action_quit_app(self) -> None:
         try:
             app_obj = self.app
-            if hasattr(app_obj, "action_quit"):
-                app_obj.action_quit()
-            elif hasattr(app_obj, "exit"):
+            if hasattr(app_obj, "_closing"):
+                app_obj._closing = True
+            if hasattr(app_obj, "_stop_hydration_timer"):
+                app_obj._stop_hydration_timer()
+            if hasattr(app_obj, "exit"):
                 app_obj.exit()
         except Exception:
             pass
