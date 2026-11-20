@@ -172,17 +172,19 @@ class FixedArrowBuffer:
 
 class SampleArrowBuffer:
     """
-    Buffered PyArrow tables for SampleMatrixTable (Handle 2 async sample hydrator).
-    Maintains columnar arrays per FORMAT tag (GT, DP, AD, GQ) across visible cohort samples,
-    representing unhydrated rows with "..." placeholders and patching batches cleanly.
+    Buffered PyArrow tables for SampleMatrixTable (Handle 2 viewport sample hydrator).
+    Maintains columnar arrays per FORMAT tag (GT, DP, AD, GQ) across all cohort samples
+    natively for FastDataTable, representing unhydrated rows with "..." placeholders.
     """
 
     def __init__(
         self,
-        visible_samples: Optional[List[str]] = None,
+        samples: Optional[List[str]] = None,
         records: Optional[List[VariantRecord]] = None,
+        visible_samples: Optional[List[str]] = None,
     ):
-        self.visible_samples: List[str] = list(visible_samples or [])
+        resolved = samples if samples is not None else visible_samples
+        self.visible_samples: List[str] = list(resolved or [])
         self._row_count: int = 0
         self._tag_columns: Dict[str, Dict[str, List[str]]] = {
             tag: {s: [] for s in self.visible_samples}
@@ -192,6 +194,10 @@ class SampleArrowBuffer:
         self._dirty_tags: set[str] = set(SAMPLE_FORMAT_TAGS)
         if records:
             self.append_records(records)
+
+    @property
+    def samples(self) -> List[str]:
+        return self.visible_samples
 
     @property
     def row_count(self) -> int:
@@ -206,9 +212,15 @@ class SampleArrowBuffer:
             row_vals.append(str(sdata.get(s, {}).get(tag, ".")))
         return row_vals
 
-    def reset(self, records: List[VariantRecord], visible_samples: Optional[List[str]] = None) -> None:
-        if visible_samples is not None:
-            self.visible_samples = list(visible_samples)
+    def reset(
+        self,
+        records: List[VariantRecord],
+        samples: Optional[List[str]] = None,
+        visible_samples: Optional[List[str]] = None,
+    ) -> None:
+        resolved = samples if samples is not None else visible_samples
+        if resolved is not None:
+            self.visible_samples = list(resolved)
         self._row_count = 0
         self._tag_columns = {
             tag: {s: [] for s in self.visible_samples}

@@ -64,12 +64,14 @@ class SparseVcfIndex:
         build_async: bool = False,
         on_progress: Optional[Callable[[int], None]] = None,
         on_complete: Optional[Callable[[int], None]] = None,
+        stop_event: Optional[threading.Event] = None,
     ):
         self.filepath = filepath
         self.step = step
         self.build_async = build_async
         self.on_progress = on_progress
         self.on_complete = on_complete
+        self._stop_event = stop_event or threading.Event()
         self.header_end_offset: int = 0
         self.total_records: int = 0
         self.checkpoints: List[SparseIndexEntry] = []
@@ -186,13 +188,18 @@ class SparseVcfIndex:
                 except Exception:
                     pass
 
+    def stop(self) -> None:
+        self._stop_event.set()
+
     def _start_async_build(self):
         def _worker():
             try:
                 self._build_index(async_mode=True)
+                if self._stop_event.is_set():
+                    return
                 self._save_index(self._index_cache_path())
                 self.is_ready = True
-                if self.on_complete:
+                if self.on_complete and not self._stop_event.is_set():
                     try:
                         self.on_complete(self.total_records)
                     except Exception:
@@ -240,6 +247,8 @@ class SparseVcfIndex:
             curr_offset = self.header_end_offset
             carry = b""
             while True:
+                if async_mode and self._stop_event.is_set():
+                    return
                 chunk = f.read(buf_size)
                 if not chunk:
                     break
@@ -269,12 +278,14 @@ class SparseVcfIndex:
                     curr_offset += len(line) + 1
                     record_idx += 1
                     if async_mode:
-                        if record_idx % 1000 == 0 and self.on_progress:
-                            try:
-                                self.on_progress(record_idx)
-                            except Exception:
-                                pass
+                        if self._stop_event.is_set():
+                            return
                         if record_idx % 2000 == 0:
+                            if self.on_progress:
+                                try:
+                                    self.on_progress(record_idx)
+                                except Exception:
+                                    pass
                             time.sleep(0.0005)
 
             if carry and carry.strip():

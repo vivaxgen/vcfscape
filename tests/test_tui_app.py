@@ -55,6 +55,8 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIn("f", bindings)
         self.assertIn("?", bindings)
         self.assertIn("q", bindings)
+        self.assertEqual(bindings.get("ctrl+c"), "quit")
+        self.assertEqual(bindings.get("ctrl+z"), "suspend_process")
 
     def test_cohort_stats_pane_resizing(self):
         pane = self.app.stats_pane
@@ -113,13 +115,19 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIn("-", bindings)
         self.assertEqual(bindings["-"], "resize_split_down")
         self.assertIn("ctrl+up", bindings)
-    def test_fixed_table_horizontal_scroll(self):
-        fixed_table = self.app.table_widget.fixed_table
+    def test_top_widget_focus_and_passive_tables(self):
+        split_view = self.app.table_widget
+        fixed_table = split_view.fixed_table
+        sample_table = split_view.sample_table
+        self.assertTrue(split_view.can_focus)
+        self.assertFalse(fixed_table.can_focus)
+        self.assertFalse(sample_table.can_focus)
         self.assertEqual(fixed_table.id, "fixed_table")
+        self.assertEqual(sample_table.id, "sample_table")
         self.assertTrue(hasattr(fixed_table, "on_mouse_scroll_left"))
         self.assertTrue(hasattr(fixed_table, "on_mouse_scroll_right"))
-        self.assertTrue(hasattr(fixed_table, "action_cursor_left"))
-        self.assertTrue(hasattr(fixed_table, "action_cursor_right"))
+        self.assertTrue(hasattr(split_view, "handle_navigation_key"))
+        self.assertTrue(hasattr(split_view, "handle_mouse_scroll"))
 
     def test_variant_split_view_cursor_sync_and_deduplication(self):
         split_view = self.app.table_widget
@@ -127,15 +135,6 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertTrue(hasattr(split_view, "_last_notified"))
         self.assertEqual(split_view.fixed_table.peer_table, split_view.sample_table)
         self.assertEqual(split_view.sample_table.peer_table, split_view.fixed_table)
-
-    def test_sample_table_horizontal_scroll(self):
-        sample_table = self.app.table_widget.sample_table
-        self.assertEqual(sample_table.id, "sample_table")
-        self.assertTrue(hasattr(sample_table, "action_cursor_left"))
-        self.assertTrue(hasattr(sample_table, "action_cursor_right"))
-        self.assertTrue(hasattr(sample_table, "scroll_column_half_screen"))
-        self.assertTrue(hasattr(sample_table, "_get_column_bounds"))
-        self.assertTrue(hasattr(sample_table, "_get_viewport_width"))
 
     def test_sample_matrix_table_visible_and_populated(self):
         """Verifies SampleMatrixTable divider width is locked to 1 and styling is set."""

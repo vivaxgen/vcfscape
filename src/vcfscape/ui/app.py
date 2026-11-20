@@ -3,8 +3,9 @@ Main Textual Application for VCFscape - VCF inspector part of vivaxGEN Project.
 """
 
 import os
+import signal
 import threading
-from typing import Optional, List
+from typing import Optional, List, Set
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual.binding import Binding
@@ -78,6 +79,8 @@ class VcfscapeApp(App):
         Binding("t", "toggle_theme", "Theme", show=False),
         Binding("?", "show_help", "Help", show=False),
         Binding("q", "quit", "Quit", show=False),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+z", "suspend_process", "Suspend", show=False, priority=True),
     ]
 
     def __init__(self, vcf_path: str, **kwargs):
@@ -90,6 +93,8 @@ class VcfscapeApp(App):
         self._closing = False
         self._main_screen: Optional[MainScreen] = None
         self._callbacks_hooked = False
+        self._pending_hydrated_indices: Set[int] = set()
+        self._hydration_timer: Optional[object] = None
 
         # Widgets
         provisional_variants = self.reader.get_total_variants_async()
@@ -177,16 +182,42 @@ class VcfscapeApp(App):
             except Exception:
                 _push_loading_modal()
 
+    def _stop_hydration_timer(self) -> None:
+        if self._hydration_timer is not None:
+            try:
+                self._hydration_timer.stop()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            self._hydration_timer = None
+
     def on_unmount(self) -> None:
         self._closing = True
+        self._stop_hydration_timer()
         if hasattr(self.reader, "close"):
             self.reader.close()
 
     def action_quit(self) -> None:
         self._closing = True
+        self._stop_hydration_timer()
         if hasattr(self.reader, "close"):
             self.reader.close()
         self.exit()
+
+    def action_suspend_process(self) -> None:
+        """Suspend TUI cleanly on Ctrl-Z and restore terminal until resumed with fg."""
+        sig_tstp = getattr(signal, "SIGTSTP", None)
+        if sig_tstp is None:
+            return
+        try:
+            with self.suspend():
+                os.kill(os.getpid(), sig_tstp)
+        except Exception:
+            try:
+                parent_suspend = getattr(super(), "action_suspend_process", None)
+                if callable(parent_suspend):
+                    parent_suspend()
+            except Exception:
+                pass
 
     def _invoke_on_ui(self, fn, *args) -> None:
         if self._closing or not getattr(self, "is_running", False):
@@ -203,10 +234,23 @@ class VcfscapeApp(App):
         self._invoke_on_ui(self._apply_samples_hydrated, indices)
 
     def _apply_samples_hydrated(self, indices: List[int]) -> None:
-        if self._closing:
+        if self._closing or not indices:
             return
+        self._pending_hydrated_indices.update(indices)
+        if self._hydration_timer is None:
+            try:
+                self._hydration_timer = self.set_timer(0.05, self._flush_hydrated_rows)
+            except Exception:
+                self._flush_hydrated_rows()
+
+    def _flush_hydrated_rows(self) -> None:
+        self._hydration_timer = None
+        if self._closing or not self._pending_hydrated_indices:
+            return
+        batch = sorted(self._pending_hydrated_indices)
+        self._pending_hydrated_indices.clear()
         if hasattr(self, "table_widget") and hasattr(self.table_widget, "hydrate_rows"):
-            self.table_widget.hydrate_rows(indices)
+            self.table_widget.hydrate_rows(batch)
 
     def _on_progress_update(self, count: int) -> None:
         self._invoke_on_ui(self._apply_progress_update, count)

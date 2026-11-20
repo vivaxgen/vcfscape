@@ -234,6 +234,22 @@ class TestVcfIndexing(unittest.TestCase):
         self.assertEqual(sample_buf._tag_columns["GT"]["S1"][0], "0/1")
         self.assertEqual(sample_buf._tag_columns["DP"]["S2"][0], "60")
 
+    def test_minimal_handle1_sites_and_clean_close(self):
+        """Background Handle 1 stores minimal core tuples only, and close() stops workers cleanly."""
+        from vcfscape.core.vcf_reader import _MinimalSite
+
+        reader = VcfReader(self.vcf_path, lazy=True)
+        try:
+            self.assertEqual(reader.total_variants, 2500)
+            with reader._site_lock:
+                self.assertIsInstance(reader._site_records[200], _MinimalSite)
+        finally:
+            reader.close()
+        self.assertTrue(reader._stop_event.is_set())
+        self.assertEqual(reader._progress_callbacks, [])
+        self.assertEqual(reader._count_callbacks, [])
+        self.assertEqual(reader._hydration_callbacks, [])
+
 
 if __name__ == "__main__":
     unittest.main()
