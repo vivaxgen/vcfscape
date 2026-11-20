@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 try:
     import textual
+    import textual_fastdatatable
+    import pyarrow
     from vcfscape.ui.widgets.variant_table import VariantSplitView, FixedVariantTable, SampleMatrixTable
     TEXTUAL_AVAILABLE = True
 except ImportError:
@@ -22,7 +24,7 @@ except ImportError:
 from vcfscape.core.vcf_reader import VariantRecord
 
 
-@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual library not installed in this environment")
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow not installed in this environment")
 class TestVariantBufferScrolling(unittest.TestCase):
 
     def setUp(self):

@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 try:
     import textual
+    import textual_fastdatatable
+    import pyarrow
     from vcfscape.ui.app import VcfscapeApp, MalariaVcfApp
     TEXTUAL_AVAILABLE = True
 except ImportError:
@@ -20,7 +22,7 @@ DEMO_VCF = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "examples", "pf3d7_surveillance_demo.vcf")
 )
 
-@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual library not installed in this environment")
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow not installed in this environment")
 class TestMalariaVcfApp(unittest.TestCase):
 
     def setUp(self):
@@ -178,6 +180,7 @@ class TestWidgetFilesPresence(unittest.TestCase):
             os.path.join(src_root, "ui", "__init__.py"),
             os.path.join(src_root, "core", "__init__.py"),
             os.path.join(src_root, "core", "vcf_reader.py"),
+            os.path.join(src_root, "core", "arrow_buffer.py"),
             os.path.join(src_root, "core", "cohorts.py"),
             os.path.join(src_root, "core", "malaria_db.py"),
         ]

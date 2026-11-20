@@ -208,6 +208,32 @@ class TestVcfIndexing(unittest.TestCase):
         finally:
             reader.close()
 
+    def test_dual_arrow_buffers_streaming_and_hydration(self):
+        """Dual FixedArrowBuffer and SampleArrowBuffer track site projections and async sample hydration."""
+        from vcfscape.core.arrow_buffer import FixedArrowBuffer, SampleArrowBuffer
+
+        site_rec = parse_vcf_site_only(
+            "Pf3D7_07_v3\t403625\tvar_crt\tG\tT\t99.0\tPASS\tGENE=crt\tGT:DP\t0/1:45\t1/1:60"
+        )
+        full_rec = parse_vcf_line(
+            "Pf3D7_07_v3\t403625\tvar_crt\tG\tT\t99.0\tPASS\tGENE=crt\tGT:DP\t0/1:45\t1/1:60",
+            ["S1", "S2"],
+        )
+
+        fixed_buf = FixedArrowBuffer([site_rec])
+        self.assertEqual(fixed_buf.row_count, 1)
+        self.assertEqual(fixed_buf.get_columns_for_mode("compact"), ["CHROM", "POS", "REF", "ALT"])
+        self.assertEqual(fixed_buf.get_columns_for_mode("essential"), ["CHROM", "POS"])
+
+        sample_buf = SampleArrowBuffer(visible_samples=["S1", "S2"], records=[site_rec])
+        self.assertEqual(sample_buf.row_count, 1)
+        self.assertEqual(sample_buf._tag_columns["GT"]["S1"][0], "...")
+        self.assertEqual(sample_buf._tag_columns["DP"]["S2"][0], "...")
+
+        self.assertTrue(sample_buf.hydrate_rows([0], {0: full_rec}))
+        self.assertEqual(sample_buf._tag_columns["GT"]["S1"][0], "0/1")
+        self.assertEqual(sample_buf._tag_columns["DP"]["S2"][0], "60")
+
 
 if __name__ == "__main__":
     unittest.main()
