@@ -141,6 +141,18 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
         if self.is_completed:
             self._safe_dismiss(self._current_count)
 
+    def _stop_spinner(self) -> None:
+        try:
+            spinner = self.query_one("#loading_spinner", AnimatedSpinner)
+            if spinner._timer is not None:
+                spinner._timer.stop()
+                spinner._timer = None
+        except Exception:
+            pass
+
+    def on_unmount(self) -> None:
+        self._stop_spinner()
+
     def _safe_dismiss(self, result: Optional[int]) -> None:
         """Idempotently dismiss this modal only once while it sits above a root screen."""
         if self._dismiss_requested:
@@ -191,18 +203,22 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
         self._safe_dismiss(self._current_count)
 
     def action_quit_app(self) -> None:
+        self._stop_spinner()
         try:
             app_obj = self.app
-            if hasattr(app_obj, "_vcfscape_closing"):
-                app_obj._vcfscape_closing = True
-            if hasattr(app_obj, "_stop_hydration_timer"):
-                app_obj._stop_hydration_timer()
-            reader = getattr(app_obj, "reader", None)
-            if reader is not None and hasattr(reader, "_stop_event"):
-                try:
-                    reader._stop_event.set()
-                except Exception:
-                    pass
+            if hasattr(app_obj, "_begin_shutdown"):
+                app_obj._begin_shutdown()
+            else:
+                if hasattr(app_obj, "_vcfscape_closing"):
+                    app_obj._vcfscape_closing = True
+                if hasattr(app_obj, "_stop_hydration_timer"):
+                    app_obj._stop_hydration_timer()
+                reader = getattr(app_obj, "reader", None)
+                if reader is not None and hasattr(reader, "close"):
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
             if hasattr(app_obj, "exit"):
                 app_obj.exit()
         except Exception:

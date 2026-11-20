@@ -250,6 +250,34 @@ class TestVcfIndexing(unittest.TestCase):
         self.assertEqual(reader._count_callbacks, [])
         self.assertEqual(reader._hydration_callbacks, [])
 
+    def test_gzipped_vcf_close_stops_workers_quickly(self):
+        """VcfReader.close() stops active .vcf.gz site/sample threads cleanly without hanging."""
+        import gzip
+
+        gz_path = self.vcf_path + ".gz"
+        with open(self.vcf_path, "rt", encoding="utf-8") as src, gzip.open(gz_path, "wt", encoding="utf-8") as dst:
+            dst.write(src.read())
+
+        try:
+            reader = VcfReader(gz_path, lazy=True)
+            reader.request_sample_hydration(0, 150)
+            t0 = time.monotonic()
+            reader.close()
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(reader._stop_workers)
+            self.assertTrue(reader._stop_event.is_set())
+            self.assertEqual(reader._progress_callbacks, [])
+            self.assertEqual(reader._count_callbacks, [])
+            self.assertEqual(reader._hydration_callbacks, [])
+            if reader._sample_thread is not None:
+                self.assertFalse(reader._sample_thread.is_alive())
+            if reader._site_thread is not None:
+                self.assertFalse(reader._site_thread.is_alive())
+        finally:
+            if os.path.exists(gz_path):
+                os.remove(gz_path)
+
 
 if __name__ == "__main__":
     unittest.main()

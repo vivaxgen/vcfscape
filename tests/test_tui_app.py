@@ -79,12 +79,18 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertEqual(new_h, pane.MAX_HEIGHT)
         self.assertEqual(pane.current_height, pane.MAX_HEIGHT)
 
-        # Test lower clamp
+        # Test lower clamp (set_height expands collapsed pane cleanly)
         new_h = pane.set_height(0)
         self.assertEqual(new_h, pane.MIN_HEIGHT)
         self.assertEqual(pane.current_height, pane.MIN_HEIGHT)
+        self.assertFalse(pane.is_collapsed)
 
-        # Test collapse toggle: starts collapsed, 1st toggle expands it
+        # Collapse pane first before testing collapsed -> expanded -> collapsed toggles
+        is_expanded = pane.toggle_pane()
+        self.assertFalse(is_expanded)
+        self.assertTrue(pane.is_collapsed)
+
+        # From collapsed, 1st toggle expands it
         is_expanded = pane.toggle_pane()
         self.assertTrue(is_expanded)
         self.assertFalse(pane.is_collapsed)
@@ -155,7 +161,8 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIn("CELL INSPECTOR", sb.cell_inspector.render().plain)
 
         # Verify exact compose order: CohortListWidget, VariantSummary, CellInspector
-        children = [c.__class__.__name__ for c in sb.children]
+        composed_widgets = list(sb.children) if sb.children else list(sb.compose())
+        children = [c.__class__.__name__ for c in composed_widgets]
         self.assertEqual(children, ["CohortListWidget", "VariantSummary", "CellInspector"])
 
 
@@ -200,6 +207,36 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertTrue(app._vcfscape_closing)
         self.assertFalse(app.is_running)
+
+    async def test_large_gzipped_vcf_q_exit_cleanly(self):
+        import gzip
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".vcf.gz", delete=False) as tf:
+            gz_path = tf.name
+
+        try:
+            with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+                f.write("##fileformat=VCFv4.2\n")
+                f.write("##contig=<ID=Pf3D7_07_v3,length=1445207>\n")
+                f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n")
+                for i in range(1200):
+                    f.write(
+                        f"Pf3D7_07_v3\t{1000 + i * 10}\tvar_{i}\tA\tT\t99\tPASS\t.\tGT:DP\t0/1:30\t0/0:25\n"
+                    )
+
+            app = VcfscapeApp(gz_path)
+            async with app.run_test(size=(120, 36)) as pilot:
+                await pilot.pause()
+                await pilot.press("q")
+                await pilot.pause()
+                self.assertTrue(app._vcfscape_closing)
+                self.assertTrue(app.reader._stop_workers)
+                self.assertTrue(app.reader._stop_event.is_set())
+            self.assertFalse(app.is_running)
+        finally:
+            if os.path.exists(gz_path):
+                os.remove(gz_path)
 
 
 class TestWidgetFilesPresence(unittest.TestCase):

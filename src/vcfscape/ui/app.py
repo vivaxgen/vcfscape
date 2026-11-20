@@ -205,34 +205,39 @@ class VcfscapeApp(App):
             except Exception:
                 pass
             self._hydration_timer = None
+        self._pending_hydrated_indices.clear()
 
-    def on_unmount(self) -> None:
+    def _begin_shutdown(self) -> None:
         self._vcfscape_closing = True
         self._stop_hydration_timer()
+        if hasattr(self, "table_widget") and hasattr(self.table_widget, "stop_timers"):
+            try:
+                self.table_widget.stop_timers()
+            except Exception:
+                pass
+        if self.loading_screen is not None and hasattr(self.loading_screen, "_stop_spinner"):
+            try:
+                self.loading_screen._stop_spinner()
+            except Exception:
+                pass
         if hasattr(self.reader, "close"):
-            self.reader.close()
+            try:
+                self.reader.close()
+            except Exception:
+                pass
+
+    def on_unmount(self) -> None:
+        self._begin_shutdown()
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
-            self._vcfscape_closing = True
-            self._stop_hydration_timer()
-            if hasattr(self.reader, "_stop_event"):
-                try:
-                    self.reader._stop_event.set()
-                except Exception:
-                    pass
+            self._begin_shutdown()
             self.exit()
 
     async def action_quit(self) -> None:
-        self._vcfscape_closing = True
-        self._stop_hydration_timer()
-        if hasattr(self.reader, "_stop_event"):
-            try:
-                self.reader._stop_event.set()
-            except Exception:
-                pass
+        self._begin_shutdown()
         self.exit()
 
     def action_suspend_process(self) -> None:
@@ -252,7 +257,11 @@ class VcfscapeApp(App):
                 pass
 
     def _invoke_on_ui(self, fn, *args) -> None:
-        if self._vcfscape_closing or not getattr(self, "is_running", False):
+        if (
+            self._vcfscape_closing
+            or getattr(self.reader, "_stop_workers", False)
+            or not getattr(self, "is_running", False)
+        ):
             return
         try:
             if threading.get_ident() == getattr(self, "_thread_id", None):

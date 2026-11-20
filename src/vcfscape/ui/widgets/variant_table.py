@@ -609,7 +609,7 @@ class VariantSplitView(Horizontal):
         except Exception:
             pass
 
-    def _disarm_click_sync(self) -> None:
+    def stop_timers(self) -> None:
         self._accept_next_highlight = False
         if self._click_timer is not None:
             try:
@@ -617,6 +617,12 @@ class VariantSplitView(Horizontal):
             except Exception:
                 pass
             self._click_timer = None
+
+    def on_unmount(self) -> None:
+        self.stop_timers()
+
+    def _disarm_click_sync(self) -> None:
+        self.stop_timers()
         try:
             self.focus()
         except Exception:

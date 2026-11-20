@@ -667,27 +667,33 @@ class VcfReader:
             self._emit_count_complete(total)
 
     def _emit_progress(self, count: int) -> None:
-        if self._stop_event.is_set():
+        if self._stop_workers or self._stop_event.is_set():
             return
         for pcb in list(self._progress_callbacks):
+            if self._stop_workers or self._stop_event.is_set():
+                return
             try:
                 pcb(count)
             except Exception:
                 pass
 
     def _emit_count_complete(self, total: int) -> None:
-        if self._stop_event.is_set():
+        if self._stop_workers or self._stop_event.is_set():
             return
         for cb in list(self._count_callbacks):
+            if self._stop_workers or self._stop_event.is_set():
+                return
             try:
                 cb(total)
             except Exception:
                 pass
 
     def _emit_hydration(self, indices: List[int]) -> None:
-        if not indices or self._stop_event.is_set():
+        if not indices or self._stop_workers or self._stop_event.is_set():
             return
         for hcb in list(self._hydration_callbacks):
+            if self._stop_workers or self._stop_event.is_set():
+                return
             try:
                 hcb(indices)
             except Exception:
@@ -767,27 +773,24 @@ class VcfReader:
                             last_emit_t = now
                             self._emit_progress(count)
                         time.sleep(0.0001)
-                if batch and not self._stop_event.is_set():
+                if batch and not self._stop_event.is_set() and not self._stop_workers:
                     with self._site_lock:
                         self._site_records.extend(batch)
-                try:
-                    site_vcf.close()
-                except Exception:
-                    pass
                 with self._site_lock:
                     self._site_stream_done = True
-                    if not self._stop_event.is_set():
+                    if not self._stop_event.is_set() and not self._stop_workers:
                         self._total_variants_count = len(self._site_records)
-                if not self._stop_event.is_set():
+                if not self._stop_event.is_set() and not self._stop_workers:
                     self._emit_progress(self._total_variants_count)
                     self._emit_count_complete(self._total_variants_count)
             except Exception:
+                with self._site_lock:
+                    self._site_stream_done = True
+            finally:
                 try:
                     site_vcf.close()
                 except Exception:
                     pass
-                with self._site_lock:
-                    self._site_stream_done = True
 
         self._site_thread = threading.Thread(target=_worker, daemon=True)
         self._site_thread.start()
@@ -873,6 +876,7 @@ class VcfReader:
 
         # Fast path 1: Tabix / CSI region query via cyvcf2 Handle 2
         if HAS_CYVCF2 and self.has_tabix and target_sites:
+            tabix_vcf = None
             try:
                 tabix_vcf = cyvcf2.VCF(self.filepath)
                 by_chrom: Dict[str, List[Tuple[int, Any]]] = {}
@@ -880,7 +884,7 @@ class VcfReader:
                     by_chrom.setdefault(srec.chrom, []).append((i, srec))
 
                 for chrom, items in by_chrom.items():
-                    if self._stop_event.is_set():
+                    if self._stop_event.is_set() or self._stop_workers:
                         break
                     min_pos = min(s.pos for _, s in items)
                     max_pos = max(s.pos for _, s in items)
@@ -890,7 +894,7 @@ class VcfReader:
                         lookup.setdefault(key, []).append(i)
 
                     for v in tabix_vcf(f"{chrom}:{min_pos}-{max_pos}"):
-                        if self._stop_event.is_set():
+                        if self._stop_event.is_set() or self._stop_workers:
                             break
                         v_alts = ",".join(v.ALT) if v.ALT else ""
                         k = (int(v.POS), v.REF, v_alts)
@@ -899,11 +903,16 @@ class VcfReader:
                             for row_i in lookup[k]:
                                 self._sample_cache.put(row_i, payload)
                                 hydrated.append(row_i)
-                tabix_vcf.close()
-                if len(hydrated) == len(missing):
+                if len(hydrated) == len(missing) or self._stop_event.is_set() or self._stop_workers:
                     return hydrated
             except Exception:
                 pass
+            finally:
+                if tabix_vcf is not None:
+                    try:
+                        tabix_vcf.close()
+                    except Exception:
+                        pass
 
         # Fast path 2: Sparse byte-offset index for plain uncompressed .vcf
         if self._sparse_index and target_sites and not self._stop_event.is_set():
@@ -943,19 +952,25 @@ class VcfReader:
             last_i = remaining[-1]
             needed_set = set(remaining)
             if HAS_CYVCF2:
+                vcf2 = None
                 try:
                     vcf2 = cyvcf2.VCF(self.filepath)
                     for idx, v in enumerate(vcf2):
-                        if idx > last_i or self._stop_event.is_set():
+                        if idx > last_i or self._stop_event.is_set() or self._stop_workers:
                             break
                         if idx in needed_set:
                             payload = _sample_payload_from_cyvcf2(v, self.samples)
                             self._sample_cache.put(idx, payload)
                             hydrated.append(idx)
-                    vcf2.close()
                     return hydrated
                 except Exception:
                     pass
+                finally:
+                    if vcf2 is not None:
+                        try:
+                            vcf2.close()
+                        except Exception:
+                            pass
 
             curr_idx = 0
             with self._open_file() as f:
@@ -1385,3 +1400,14 @@ class VcfReader:
         with self._sample_cond:
             self._priority_window = None
             self._sample_cond.notify_all()
+        cur = threading.current_thread()
+        for t in (
+            self._sample_thread,
+            self._site_thread,
+            getattr(self._sparse_index, "_worker_thread", None) if self._sparse_index is not None else None,
+        ):
+            if t is not None and t is not cur and t.is_alive():
+                try:
+                    t.join(timeout=0.15)
+                except Exception:
+                    pass
