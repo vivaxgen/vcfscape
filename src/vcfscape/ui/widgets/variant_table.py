@@ -8,9 +8,13 @@ With top-widget VariantSplitView keyboard & mouse-wheel capture commanding both 
 in strict lockstep without flickering or cursor cell jumping.
 """
 
+import dataclasses
+from functools import cached_property
+import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from textual import events, on
 from textual.coordinate import Coordinate
+from textual.geometry import Size
 from textual.widget import Widget
 from textual.widgets import Static
 from textual.containers import Horizontal
@@ -53,6 +57,7 @@ class StyledArrowBackend(ArrowBackend):
         cell_styler: Optional[Callable[[int, int, Any], Any]] = None,
     ):
         super().__init__(table)
+        self.pa_table = table
         self._row_styler = row_styler
         self._cell_styler = cell_styler
 
@@ -76,44 +81,168 @@ class StyledArrowBackend(ArrowBackend):
         return val
 
 
-def _apply_arrow_backend_to_table(table: FastDataTable, new_backend: Any) -> None:
-    """Swap buffered ArrowBackend safely across textual-fastdatatable versions."""
+def _estimate_column_content_widths(backend: Any, column_labels: List[str]) -> List[int]:
+    """Compute column content widths quickly from Arrow table sample rows."""
+    widths = [max(1, len(lbl)) for lbl in column_labels]
+    row_count = getattr(backend, "row_count", 0)
+    pa_tbl = getattr(backend, "pa_table", None) or getattr(backend, "source", None)
+    sample_rows = min(80, row_count)
+    if pa_tbl is not None and sample_rows > 0:
+        try:
+            for col_idx in range(min(len(widths), pa_tbl.num_columns)):
+                col_arr = pa_tbl.column(col_idx)
+                for r in range(sample_rows):
+                    val = col_arr[r].as_py()
+                    if val is not None:
+                        s_len = len(str(val))
+                        if s_len > widths[col_idx]:
+                            widths[col_idx] = s_len
+            return widths
+        except Exception:
+            pass
+    for r in range(sample_rows):
+        try:
+            row_vals = backend.get_row_at(r)
+            for col_idx, val in enumerate(row_vals):
+                if col_idx < len(widths) and val is not None:
+                    s_len = len(str(val))
+                    if s_len > widths[col_idx]:
+                        widths[col_idx] = s_len
+        except Exception:
+            break
+    return widths
+
+
+def _rebuild_table_columns(table: FastDataTable, new_backend: Any, column_labels: List[str]) -> None:
+    """Rebuild DataTable.columns and _column_locations cleanly when schema changes."""
+    cols_obj = getattr(table, "columns", None)
+    if not isinstance(cols_obj, dict):
+        return
+
+    sample_key = next(iter(cols_obj.keys()), None)
+    sample_col = next(iter(cols_obj.values()), None)
+    if sample_col is None:
+        return
+
+    KeyCls = type(sample_key) if sample_key is not None else None
+    ColCls = type(sample_col)
+    widths = _estimate_column_content_widths(new_backend, column_labels)
+
+    new_keys: List[Any] = []
+    new_cols_dict: Dict[Any, Any] = {}
+    is_dc = dataclasses.is_dataclass(sample_col)
+    dc_fields = {f.name for f in dataclasses.fields(sample_col)} if is_dc else set()
+
+    for idx, lbl in enumerate(column_labels):
+        col_key = KeyCls(lbl) if KeyCls is not None else lbl
+        col_w = widths[idx] if idx < len(widths) else max(4, len(lbl))
+        if is_dc:
+            repl_kwargs: Dict[str, Any] = {}
+            if "key" in dc_fields:
+                repl_kwargs["key"] = col_key
+            if "label" in dc_fields:
+                repl_kwargs["label"] = Text(lbl)
+            if "content_width" in dc_fields:
+                repl_kwargs["content_width"] = col_w
+            if "auto_width" in dc_fields:
+                repl_kwargs["auto_width"] = True
+                if "width" in dc_fields:
+                    repl_kwargs["width"] = 0
+            elif "width" in dc_fields:
+                repl_kwargs["width"] = col_w
+            new_col = dataclasses.replace(sample_col, **repl_kwargs)
+        else:
+            new_col = ColCls(key=col_key, label=Text(lbl), width=0, content_width=col_w, auto_width=True)
+        new_keys.append(col_key)
+        new_cols_dict[col_key] = new_col
+
+    cols_obj.clear()
+    cols_obj.update(new_cols_dict)
+
+    locs = getattr(table, "_column_locations", None)
+    if locs is not None:
+        if hasattr(locs, "clear"):
+            locs.clear()
+            for idx, k in enumerate(new_keys):
+                locs[k] = idx
+        else:
+            try:
+                table._column_locations = type(locs)({k: idx for idx, k in enumerate(new_keys)})
+            except Exception:
+                pass
+
+
+def _invoke_zero_arg_or_empty(fn: Any) -> None:
+    """Safely invoke internal DataTable cache/dimension helpers."""
+    if not callable(fn):
+        return
+    try:
+        sig = inspect.signature(fn)
+        required = [
+            p for p in sig.parameters.values()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if not required:
+            fn()
+        elif len(required) == 1:
+            fn(())
+    except Exception:
+        pass
+
+
+def _apply_arrow_backend_to_table(
+    table: FastDataTable,
+    new_backend: Any,
+    column_labels: Optional[List[str]] = None,
+) -> None:
+    """Swap buffered ArrowBackend safely while keeping columns, virtual_size, and scroll in sync."""
     if new_backend is None:
         return
+
+    if column_labels is None:
+        pa_tbl = getattr(new_backend, "pa_table", None) or getattr(new_backend, "source", None)
+        if pa_tbl is not None and hasattr(pa_tbl, "column_names"):
+            column_labels = list(pa_tbl.column_names)
+
     if hasattr(table, "set_backend"):
         table.set_backend(new_backend)
-        return
+    else:
+        ordered = getattr(table, "ordered_columns", None)
+        if ordered is not None:
+            cur_labels = [str(getattr(c, "label", c)) for c in ordered]
+        elif isinstance(getattr(table, "columns", None), dict):
+            cur_labels = [str(getattr(c, "label", c)) for c in table.columns.values()]
+        else:
+            cur_labels = [str(getattr(c, "label", c)) for c in (getattr(table, "columns", None) or [])]
 
-    table.backend = new_backend
+        table.backend = new_backend
 
-    new_backend_cols = getattr(new_backend, "columns", None)
-    if new_backend_cols is not None:
-        new_labels = [getattr(c, "label", c) for c in new_backend_cols]
-        cur_labels = [getattr(c, "label", c) for c in (getattr(table, "columns", None) or [])]
-        if cur_labels != new_labels:
-            if hasattr(table, "_load_from_backend"):
-                try:
-                    table._load_from_backend()
-                except Exception:
-                    pass
-            elif hasattr(table, "watch_backend") and not isinstance(getattr(type(table), "backend", None), reactive):
-                try:
-                    table.watch_backend(new_backend)
-                except Exception:
-                    pass
-            else:
-                try:
-                    from textual_fastdatatable.models import Column
-                    table.columns = [Column(label=str(lbl), width=None) for lbl in new_labels]
-                except Exception:
-                    pass
+        if column_labels is not None and cur_labels != column_labels:
+            _rebuild_table_columns(table, new_backend, column_labels)
+
+    for cls in type(table).__mro__:
+        for prop_name, prop_obj in cls.__dict__.items():
+            if isinstance(prop_obj, cached_property):
+                table.__dict__.pop(prop_name, None)
+
+    for prop_name in (
+        "ordered_columns",
+        "ordered_rows",
+        "_ordered_column_keys",
+        "_ordered_columns",
+    ):
+        if hasattr(table, "__dict__"):
+            table.__dict__.pop(prop_name, None)
 
     for cache_attr in (
         "_row_cache",
         "_line_cache",
         "_row_render_cache",
+        "_cell_render_cache",
         "_cell_widths",
         "_styled_cell_cache",
+        "_updated_cells",
     ):
         cache_obj = getattr(table, cache_attr, None)
         if hasattr(cache_obj, "clear"):
@@ -125,12 +254,46 @@ def _apply_arrow_backend_to_table(table: FastDataTable, new_backend: Any) -> Non
         "_update_column_widths",
         "_update_dimensions",
     ):
-        fn = getattr(table, method_name, None)
-        if callable(fn):
+        _invoke_zero_arg_or_empty(getattr(table, method_name, None))
+
+    # Clamp cursor and virtual_size / scroll_y strictly to new backend bounds
+    new_row_count = int(getattr(new_backend, "row_count", 0))
+    new_col_count = int(getattr(new_backend, "column_count", len(column_labels or [])))
+
+    coord = getattr(table, "cursor_coordinate", None)
+    if coord is not None and new_row_count > 0 and new_col_count > 0:
+        safe_r = max(0, min(new_row_count - 1, coord.row))
+        safe_c = max(0, min(new_col_count - 1, coord.column))
+        if safe_r != coord.row or safe_c != coord.column:
             try:
-                fn()
+                table.cursor_coordinate = Coordinate(safe_r, safe_c)
             except Exception:
                 pass
+
+    try:
+        hdr_h = getattr(table, "header_height", 1) if getattr(table, "show_header", True) else 0
+        expected_h = new_row_count + hdr_h
+        ordered_cols = getattr(table, "ordered_columns", None)
+        if ordered_cols is not None:
+            pad = int(getattr(table, "cell_padding", 1)) * 2
+            expected_w = sum(
+                c.get_render_width(table)
+                if hasattr(c, "get_render_width")
+                else max(4, int(getattr(c, "width", 0) or (getattr(c, "content_width", 0) + pad) or 8))
+                for c in ordered_cols
+            )
+        else:
+            expected_w = table.virtual_size.width
+        cur_vs = getattr(table, "virtual_size", None)
+        if cur_vs is not None and (cur_vs.height != expected_h or (expected_w > 0 and cur_vs.width != expected_w)):
+            table.virtual_size = Size(max(1, expected_w), max(1, expected_h))
+        vp_h = max(1, getattr(getattr(table, "size", None), "height", 1))
+        max_y = max(0, expected_h - vp_h)
+        if getattr(table, "scroll_y", 0) > max_y:
+            table.scroll_to(y=max_y, animate=False, force=True)
+    except Exception:
+        pass
+
     try:
         table.refresh(layout=True)
     except Exception:
@@ -148,9 +311,9 @@ class FixedVariantTable(FastDataTable):
         self.split_view: Optional[Any] = None
         self._syncing_scroll: bool = False
 
-    def apply_arrow_backend(self, new_backend: Any) -> None:
+    def apply_arrow_backend(self, new_backend: Any, column_labels: Optional[List[str]] = None) -> None:
         """Swap buffered ArrowBackend while preserving scroll position."""
-        _apply_arrow_backend_to_table(self, new_backend)
+        _apply_arrow_backend_to_table(self, new_backend, column_labels=column_labels)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         """Disable live mouse pointer tracking over fixed variant table."""
@@ -271,9 +434,9 @@ class SampleMatrixTable(FastDataTable):
         self.peer_table: Optional[FastDataTable] = None
         self.split_view: Optional[Any] = None
 
-    def apply_arrow_backend(self, new_backend: Any) -> None:
+    def apply_arrow_backend(self, new_backend: Any, column_labels: Optional[List[str]] = None) -> None:
         """Swap buffered ArrowBackend while preserving scroll position."""
-        _apply_arrow_backend_to_table(self, new_backend)
+        _apply_arrow_backend_to_table(self, new_backend, column_labels=column_labels)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         """Disable live mouse pointer tracking over sample matrix table."""
@@ -681,11 +844,12 @@ class VariantSplitView(Widget):
     def _refresh_fixed_backend(self) -> None:
         self.fixed_table.styles.width = self.FIXED_WIDTHS.get(self.view_mode, 56)
         backend = self._build_fixed_arrow_backend(self.view_mode)
-        self.fixed_table.apply_arrow_backend(backend)
+        self.fixed_table.apply_arrow_backend(backend, column_labels=self._get_fixed_columns())
 
     def _refresh_sample_backend(self) -> None:
         backend = self._build_sample_arrow_backend(self.format_tag)
-        self.sample_table.apply_arrow_backend(backend)
+        sample_cols = self.get_visible_samples() or ["Samples"]
+        self.sample_table.apply_arrow_backend(backend, column_labels=sample_cols)
 
     def update_total_variants(self, count: int) -> None:
         """Update total variant count when background counter completes."""
@@ -785,11 +949,15 @@ class VariantSplitView(Widget):
 
         def _apply():
             try:
-                self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
+                f_max = getattr(self.fixed_table, "max_scroll_y", clamped_y)
+                f_y = min(clamped_y, int(f_max)) if f_max is not None and f_max >= 0 else clamped_y
+                self.fixed_table.scroll_to(y=f_y, animate=False, force=True)
             except Exception:
                 pass
             try:
-                self.sample_table.scroll_to(y=clamped_y, animate=False, force=True)
+                s_max = getattr(self.sample_table, "max_scroll_y", clamped_y)
+                s_y = min(clamped_y, int(s_max)) if s_max is not None and s_max >= 0 else clamped_y
+                self.sample_table.scroll_to(y=s_y, animate=False, force=True)
             except Exception:
                 pass
 
@@ -1265,6 +1433,8 @@ class VariantSplitView(Widget):
 
         self.fixed_buffer.reset(self.records)
         self.sample_buffer.reset(self.records, visible_samples=self.get_visible_samples())
+        self._viewport_scroll_y = 0
+        self._command_tables_scroll_y(0)
         self._refresh_fixed_backend()
         self._refresh_sample_backend()
         self._command_tables_scroll_y(0)
