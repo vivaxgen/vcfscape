@@ -54,6 +54,10 @@ SampleMatrixTable,
     background: #0b0f17;
 }
 
+FixedVariantTable > .datatable--cursor,
+SampleMatrixTable > .datatable--cursor,
+#fixed_table > .datatable--cursor,
+#sample_table > .datatable--cursor,
 FixedVariantTable > .fast-datatable--cursor,
 SampleMatrixTable > .fast-datatable--cursor,
 #fixed_table > .fast-datatable--cursor,
@@ -63,6 +67,10 @@ SampleMatrixTable > .fast-datatable--cursor,
     text-style: bold;
 }
 
+FixedVariantTable > .datatable--hover,
+SampleMatrixTable > .datatable--hover,
+#fixed_table > .datatable--hover,
+#sample_table > .datatable--hover,
 FixedVariantTable > .fast-datatable--hover,
 SampleMatrixTable > .fast-datatable--hover,
 #fixed_table > .fast-datatable--hover,
@@ -70,6 +78,8 @@ SampleMatrixTable > .fast-datatable--hover,
     background: transparent;
 }
 
+FixedVariantTable > .datatable--header,
+#fixed_table > .datatable--header,
 FixedVariantTable > .fast-datatable--header,
 #fixed_table > .fast-datatable--header {
     background: #161e2e;
@@ -77,6 +87,8 @@ FixedVariantTable > .fast-datatable--header,
     text-style: bold;
 }
 
+SampleMatrixTable > .datatable--header,
+#sample_table > .datatable--header,
 SampleMatrixTable > .fast-datatable--header,
 #sample_table > .fast-datatable--header {
     background: #161e2e;
@@ -142,6 +154,8 @@ Screen.theme-light SampleMatrixTable {
     background: #ffffff;
 }
 
+Screen.theme-light FixedVariantTable > .datatable--cursor,
+Screen.theme-light SampleMatrixTable > .datatable--cursor,
 Screen.theme-light FixedVariantTable > .fast-datatable--cursor,
 Screen.theme-light SampleMatrixTable > .fast-datatable--cursor {
     background: #2563eb;
@@ -149,6 +163,8 @@ Screen.theme-light SampleMatrixTable > .fast-datatable--cursor {
     text-style: bold;
 }
 
+Screen.theme-light FixedVariantTable > .datatable--header,
+Screen.theme-light SampleMatrixTable > .datatable--header,
 Screen.theme-light FixedVariantTable > .fast-datatable--header,
 Screen.theme-light SampleMatrixTable > .fast-datatable--header {
     background: #e2e8f0;

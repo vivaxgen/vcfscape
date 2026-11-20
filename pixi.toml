@@ -16,6 +16,8 @@ nodejs = ">=18"
 [pypi-dependencies]
 vcfscape = { path = ".", editable = true }
 textual = ">=0.70.0"
+textual-fastdatatable = ">=0.13.0"
+pyarrow = ">=14.0.0"
 
 [tasks]
 tui = "vcfscape --demo"

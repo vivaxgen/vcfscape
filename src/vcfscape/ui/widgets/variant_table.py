@@ -9,7 +9,7 @@ in strict lockstep without flickering or cursor cell jumping.
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from textual import events
+from textual import events, on
 from textual.coordinate import Coordinate
 from textual.widget import Widget
 from textual.widgets import Static
@@ -17,8 +17,19 @@ from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.message import Message
 from rich.text import Text
-from textual_fastdatatable import FastDataTable
-from textual_fastdatatable.backend import ArrowBackend
+
+try:
+    from textual_fastdatatable import DataTable as FastDataTable
+except ImportError:
+    from textual_fastdatatable import FastDataTable  # type: ignore
+
+try:
+    from textual_fastdatatable import ArrowBackend
+except ImportError:
+    try:
+        from textual_fastdatatable.backends.arrow import ArrowBackend
+    except ImportError:
+        from textual_fastdatatable.backend import ArrowBackend  # type: ignore
 
 from vcfscape.core.vcf_reader import VariantRecord
 from vcfscape.core.arrow_buffer import (
@@ -31,19 +42,99 @@ from vcfscape.core.arrow_buffer import (
 
 class StyledArrowBackend(ArrowBackend):
     """
-    ArrowBackend extension applying lazy viewport-only Rich Text styling on visible rows.
+    ArrowBackend extension applying lazy viewport-only Rich Text styling on visible rows/cells.
     Keeps underlying storage 100% columnar PyArrow arrays.
     """
 
-    def __init__(self, table: Any, row_styler: Optional[Callable[[int, List[Any]], List[Any]]] = None):
+    def __init__(
+        self,
+        table: Any,
+        row_styler: Optional[Callable[[int, List[Any]], List[Any]]] = None,
+        cell_styler: Optional[Callable[[int, int, Any], Any]] = None,
+    ):
         super().__init__(table)
         self._row_styler = row_styler
+        self._cell_styler = cell_styler
 
     def get_row_at(self, row: int) -> List[Any]:
         values = super().get_row_at(row)
         if self._row_styler is not None:
             return self._row_styler(row, list(values))
-        return values
+        return list(values)
+
+    def get_cell_at(self, row: int, column: int) -> Any:
+        if hasattr(super(), "get_cell_at"):
+            val = super().get_cell_at(row, column)
+        else:
+            val = super().get_row_at(row)[column]
+        if self._cell_styler is not None:
+            return self._cell_styler(row, column, val)
+        if self._row_styler is not None:
+            styled = self._row_styler(row, list(super().get_row_at(row)))
+            if 0 <= column < len(styled):
+                return styled[column]
+        return val
+
+
+def _apply_arrow_backend_to_table(table: FastDataTable, new_backend: Any) -> None:
+    """Swap buffered ArrowBackend safely across textual-fastdatatable versions."""
+    if new_backend is None:
+        return
+    if hasattr(table, "set_backend"):
+        table.set_backend(new_backend)
+        return
+
+    table.backend = new_backend
+
+    new_backend_cols = getattr(new_backend, "columns", None)
+    if new_backend_cols is not None:
+        new_labels = [getattr(c, "label", c) for c in new_backend_cols]
+        cur_labels = [getattr(c, "label", c) for c in (getattr(table, "columns", None) or [])]
+        if cur_labels != new_labels:
+            if hasattr(table, "_load_from_backend"):
+                try:
+                    table._load_from_backend()
+                except Exception:
+                    pass
+            elif hasattr(table, "watch_backend") and not isinstance(getattr(type(table), "backend", None), reactive):
+                try:
+                    table.watch_backend(new_backend)
+                except Exception:
+                    pass
+            else:
+                try:
+                    from textual_fastdatatable.models import Column
+                    table.columns = [Column(label=str(lbl), width=None) for lbl in new_labels]
+                except Exception:
+                    pass
+
+    for cache_attr in (
+        "_row_cache",
+        "_line_cache",
+        "_row_render_cache",
+        "_cell_widths",
+        "_styled_cell_cache",
+    ):
+        cache_obj = getattr(table, cache_attr, None)
+        if hasattr(cache_obj, "clear"):
+            cache_obj.clear()
+
+    for method_name in (
+        "_reset_render_caches",
+        "_clear_caches",
+        "_update_column_widths",
+        "_update_dimensions",
+    ):
+        fn = getattr(table, method_name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+    try:
+        table.refresh(layout=True)
+    except Exception:
+        pass
 
 
 class FixedVariantTable(FastDataTable):
@@ -59,24 +150,7 @@ class FixedVariantTable(FastDataTable):
 
     def apply_arrow_backend(self, new_backend: Any) -> None:
         """Swap buffered ArrowBackend while preserving scroll position."""
-        if new_backend is None:
-            return
-        if hasattr(self, "set_backend"):
-            self.set_backend(new_backend)
-        else:
-            self.backend = new_backend
-            for cache_attr in ("_row_cache", "_line_cache", "_cell_widths"):
-                cache_obj = getattr(self, cache_attr, None)
-                if hasattr(cache_obj, "clear"):
-                    cache_obj.clear()
-            if hasattr(self, "_reset_render_caches"):
-                self._reset_render_caches()
-            if hasattr(self, "_update_dimensions"):
-                self._update_dimensions()
-            try:
-                self.refresh(layout=True)
-            except Exception:
-                pass
+        _apply_arrow_backend_to_table(self, new_backend)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         """Disable live mouse pointer tracking over fixed variant table."""
@@ -199,24 +273,7 @@ class SampleMatrixTable(FastDataTable):
 
     def apply_arrow_backend(self, new_backend: Any) -> None:
         """Swap buffered ArrowBackend while preserving scroll position."""
-        if new_backend is None:
-            return
-        if hasattr(self, "set_backend"):
-            self.set_backend(new_backend)
-        else:
-            self.backend = new_backend
-            for cache_attr in ("_row_cache", "_line_cache", "_cell_widths"):
-                cache_obj = getattr(self, cache_attr, None)
-                if hasattr(cache_obj, "clear"):
-                    cache_obj.clear()
-            if hasattr(self, "_reset_render_caches"):
-                self._reset_render_caches()
-            if hasattr(self, "_update_dimensions"):
-                self._update_dimensions()
-            try:
-                self.refresh(layout=True)
-            except Exception:
-                pass
+        _apply_arrow_backend_to_table(self, new_backend)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         """Disable live mouse pointer tracking over sample matrix table."""
@@ -448,6 +505,8 @@ class VariantSplitView(Widget):
         background: #0b0f17;
     }
 
+    #fixed_table > .datatable--hover,
+    #sample_table > .datatable--hover,
     #fixed_table > .fast-datatable--hover,
     #sample_table > .fast-datatable--hover {
         background: transparent;
@@ -523,6 +582,7 @@ class VariantSplitView(Widget):
             show_cursor=True,
             null_rep=".",
         )
+        self.fixed_table.styles.width = self.FIXED_WIDTHS.get(self.view_mode, 56)
 
         # 2. Divider - locked to 1 column width to prevent pushing sample_table off-screen
         self.divider = Static("│", id="table_divider")
@@ -550,6 +610,18 @@ class VariantSplitView(Widget):
         self.fixed_table.split_view = self
         self.sample_table.split_view = self
 
+    def _style_fixed_cell_value(self, row_idx: int, col_idx: int, val: Any) -> Any:
+        cols = self._get_fixed_columns()
+        col_name = cols[col_idx] if 0 <= col_idx < len(cols) else ""
+        sval = "." if val is None else str(val)
+        if col_name == "FILTER":
+            return Text(sval, style="green" if sval == "PASS" else "red")
+        if col_name == "GENE":
+            rec = self.records[row_idx] if 0 <= row_idx < len(self.records) else None
+            is_drug = bool(rec and rec.drug_annotation)
+            return Text(sval, style="bold yellow" if is_drug else "white")
+        return sval
+
     def _style_fixed_row_values(self, row_idx: int, values: List[Any]) -> List[Any]:
         """Apply lazy Rich Text styling for visible rows in FixedVariantTable."""
         cols = self._get_fixed_columns()
@@ -566,6 +638,13 @@ class VariantSplitView(Widget):
                 styled.append(sval)
         return styled
 
+    def _style_sample_cell_value(self, row_idx: int, _col_idx: int, val: Any) -> Any:
+        rec = self.records[row_idx] if 0 <= row_idx < len(self.records) else None
+        samples_loaded = getattr(rec, "samples_loaded", True) if rec is not None else True
+        if not samples_loaded:
+            return Text("...", style="dim bright_black")
+        return self._style_sample_cell("." if val is None else str(val), self.format_tag)
+
     def _style_sample_row_values(self, row_idx: int, values: List[Any]) -> List[Any]:
         """Apply lazy Rich Text styling for visible rows in SampleMatrixTable."""
         rec = self.records[row_idx] if 0 <= row_idx < len(self.records) else None
@@ -581,7 +660,11 @@ class VariantSplitView(Widget):
         pa_tbl = self.fixed_buffer.get_arrow_table(view_mode)
         if pa_tbl is None:
             return None
-        return StyledArrowBackend(pa_tbl, row_styler=self._style_fixed_row_values)
+        return StyledArrowBackend(
+            pa_tbl,
+            row_styler=self._style_fixed_row_values,
+            cell_styler=self._style_fixed_cell_value,
+        )
 
     def _build_sample_arrow_backend(self, format_tag: str) -> Optional[Any]:
         if not (HAS_PYARROW and HAS_FASTDATATABLE):
@@ -589,7 +672,11 @@ class VariantSplitView(Widget):
         pa_tbl = self.sample_buffer.get_arrow_table(format_tag)
         if pa_tbl is None:
             return None
-        return StyledArrowBackend(pa_tbl, row_styler=self._style_sample_row_values)
+        return StyledArrowBackend(
+            pa_tbl,
+            row_styler=self._style_sample_row_values,
+            cell_styler=self._style_sample_cell_value,
+        )
 
     def _refresh_fixed_backend(self) -> None:
         self.fixed_table.styles.width = self.FIXED_WIDTHS.get(self.view_mode, 56)
@@ -1294,6 +1381,7 @@ class VariantSplitView(Widget):
         pass
 
     # Click-only highlight sync (delayed programmatic move_cursor echoes are ignored)
+    @on(FastDataTable.RowHighlighted)
     def on_fast_data_table_row_highlighted(self, event: FastDataTable.RowHighlighted) -> None:
         if self._rebuilding or self._is_fetching_more or self._is_internal_update:
             return
@@ -1308,6 +1396,7 @@ class VariantSplitView(Widget):
             if target_row is not None:
                 self.set_active_row(int(target_row), sync_fixed=False, sync_sample=True)
 
+    @on(FastDataTable.CellHighlighted)
     def on_fast_data_table_cell_highlighted(self, event: FastDataTable.CellHighlighted) -> None:
         if self._rebuilding or self._is_fetching_more or self._is_internal_update:
             return

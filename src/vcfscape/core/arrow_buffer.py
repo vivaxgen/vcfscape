@@ -21,11 +21,19 @@ except ImportError:
     HAS_PYARROW = False
 
 try:
-    from textual_fastdatatable.backend import ArrowBackend
+    from textual_fastdatatable import ArrowBackend
     HAS_FASTDATATABLE = True
 except ImportError:
-    ArrowBackend = None  # type: ignore
-    HAS_FASTDATATABLE = False
+    try:
+        from textual_fastdatatable.backends.arrow import ArrowBackend
+        HAS_FASTDATATABLE = True
+    except ImportError:
+        try:
+            from textual_fastdatatable.backend import ArrowBackend
+            HAS_FASTDATATABLE = True
+        except ImportError:
+            ArrowBackend = None  # type: ignore
+            HAS_FASTDATATABLE = False
 
 
 FIXED_ALL_COLUMNS = [
@@ -251,7 +259,11 @@ class SampleArrowBuffer:
             return None
         tag_key = tag.upper() if tag.upper() in SAMPLE_FORMAT_TAGS else "GT"
         if not self.visible_samples:
-            return pa.table({})
+            self._tables[tag_key] = pa.table(
+                {"Samples": pa.array(["-"] * self._row_count, type=pa.string())}
+            )
+            self._dirty_tags.discard(tag_key)
+            return self._tables[tag_key]
         cols = self._tag_columns[tag_key]
         arrays = {s: pa.array(cols[s], type=pa.string()) for s in self.visible_samples}
         self._tables[tag_key] = pa.table(arrays)
