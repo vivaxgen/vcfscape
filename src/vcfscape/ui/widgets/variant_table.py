@@ -257,7 +257,13 @@ class VariantSplitView(Horizontal):
         height: 100%;
         background: #0b0f17;
     }
+
+    #sample_table.no-vertical-scrollbar {
+        scrollbar-size-vertical: 0;
+    }
     """
+
+    VERTICAL_SCROLLBAR_HIDE_THRESHOLD = 1000
 
     FIXED_WIDTHS = {
         "essential": 28,
@@ -275,7 +281,6 @@ class VariantSplitView(Horizontal):
     ):
         super().__init__(**kwargs)
         self.reader = reader
-        self.records = list(records)
         self.samples = list(samples)
         self._is_internal_update = False
         self._accept_next_highlight = False
@@ -284,11 +289,19 @@ class VariantSplitView(Horizontal):
         self.current_row_idx = 0
         self.current_sample_idx = 0
         self._viewport_scroll_y = 0
+        self._sample_window_start = 0
+        self._sample_window_global_indices: List[int] = []
         self._last_notified: Optional[Tuple[int, int]] = None
 
         self.window_size = 150
         self._is_fetching_more = False
         self._is_main_stream_view = True
+        self._subset_records: Optional[List[VariantRecord]] = None
+        self._active_global_indices: Optional[List[int]] = None
+        self._record_cache: Dict[int, VariantRecord] = {
+            idx: rec for idx, rec in enumerate(records)
+        }
+
         if self.reader:
             if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
                 self.total_records_count = self.reader.get_total_variants_async()
@@ -299,9 +312,23 @@ class VariantSplitView(Horizontal):
         else:
             self.total_records_count = len(records)
 
+        self._observed_variant_count = self.total_records_count if self.total_records_count is not None else len(records)
         self._rebuilding = False
 
-        self.fixed_buffer = FixedArrowBuffer(self.records)
+        # Populate FixedArrowBuffer with all initial core site rows (and any already-streamed Handle 1 rows)
+        self.fixed_buffer = FixedArrowBuffer(records)
+        if self.reader is not None and hasattr(self.reader, "get_site_slice"):
+            extra_sites = self.reader.get_site_slice(self.fixed_buffer.row_count)
+            if extra_sites:
+                self.fixed_buffer.append_records(extra_sites)
+                self._observed_variant_count = max(self._observed_variant_count, self.fixed_buffer.row_count)
+
+        # Populate SampleArrowBuffer with ONLY the initial visible viewport slice
+        initial_vp_rows = 25
+        initial_slice = list(records[:initial_vp_rows])
+        self._sample_window_start = 0
+        self._sample_window_global_indices = list(range(len(initial_slice)))
+        self.records = initial_slice
         self.sample_buffer = SampleArrowBuffer(samples=self.samples, records=self.records)
 
         fixed_backend = self._build_fixed_arrow_backend(self.view_mode)
@@ -340,6 +367,7 @@ class VariantSplitView(Horizontal):
         self.sample_table.peer_table = self.fixed_table
         self.fixed_table.split_view = self
         self.sample_table.split_view = self
+        self._sync_sample_vertical_scrollbar()
 
     def compose(self):
         yield self.fixed_table
@@ -347,14 +375,33 @@ class VariantSplitView(Horizontal):
         yield self.sample_table
 
     def on_mount(self):
+        self._sync_sample_vertical_scrollbar()
+        self.sync_fixed_buffer_from_reader()
         if getattr(self.fixed_table, "backend", None) is None or getattr(self.sample_table, "backend", None) is None:
             self.rebuild_tables()
         else:
             self._notify_selection(self.current_row_idx, self.current_sample_idx)
         try:
+            self.call_after_refresh(self._adjust_mounted_viewport)
+        except Exception:
+            pass
+        try:
             self.focus()
         except Exception:
             pass
+
+    def _adjust_mounted_viewport(self) -> None:
+        if self._split_view_closing:
+            return
+        if self._get_active_row_count() > 0:
+            self._sync_sample_viewport_window(
+                self._viewport_scroll_y,
+                saved_x=getattr(self.sample_table, "scroll_x", 0),
+            )
+            try:
+                self.fixed_table.scroll_to(y=self._viewport_scroll_y, animate=False, force=True)
+            except Exception:
+                pass
 
     def _style_fixed_cell_value(self, row_idx: int, col_idx: int, val: Any) -> Any:
         cols = self._get_fixed_columns()
@@ -363,25 +410,41 @@ class VariantSplitView(Horizontal):
         if col_name == "FILTER":
             return Text(sval, style="green" if sval == "PASS" else "red")
         if col_name == "GENE":
-            rec = self.records[row_idx] if 0 <= row_idx < len(self.records) else None
-            is_drug = bool(rec and rec.drug_annotation)
+            global_idx = self._display_to_global_row(row_idx)
+            if global_idx is not None and self._subset_records is None:
+                is_drug = self.fixed_buffer.is_drug_row(global_idx)
+            else:
+                is_drug = self.fixed_buffer.is_drug_row(row_idx)
             return Text(sval, style="bold yellow" if is_drug else "white")
         return sval
 
     def _style_fixed_row_values(self, row_idx: int, values: List[Any]) -> List[Any]:
         cols = self._get_fixed_columns()
-        rec = self.records[row_idx] if 0 <= row_idx < len(self.records) else None
+        global_idx = self._display_to_global_row(row_idx)
+        if global_idx is not None and self._subset_records is None:
+            is_drug = self.fixed_buffer.is_drug_row(global_idx)
+        else:
+            is_drug = self.fixed_buffer.is_drug_row(row_idx)
         styled: List[Any] = []
         for col_name, val in zip(cols, values):
             sval = "." if val is None else str(val)
             if col_name == "FILTER":
                 styled.append(Text(sval, style="green" if sval == "PASS" else "red"))
             elif col_name == "GENE":
-                is_drug = bool(rec and rec.drug_annotation)
                 styled.append(Text(sval, style="bold yellow" if is_drug else "white"))
             else:
                 styled.append(sval)
         return styled
+
+    def _live_fixed_row(self, row_idx: int) -> List[Any]:
+        buf_idx = self._display_to_buffer_row(row_idx)
+        return self.fixed_buffer.get_row_values(buf_idx, self.view_mode)
+
+    def _live_fixed_cell(self, row_idx: int, col_idx: int) -> Any:
+        cols = self._get_fixed_columns()
+        col_name = cols[col_idx] if 0 <= col_idx < len(cols) else ""
+        buf_idx = self._display_to_buffer_row(row_idx)
+        return self.fixed_buffer.get_cell_value(buf_idx, col_name)
 
     def _style_sample_cell(self, val: str, tag: str) -> Text:
         if tag == "GT":
@@ -443,13 +506,16 @@ class VariantSplitView(Horizontal):
     def _build_fixed_arrow_backend(self, view_mode: str) -> Optional[Any]:
         if not (HAS_PYARROW and HAS_FASTDATATABLE):
             return None
-        pa_tbl = self.fixed_buffer.get_arrow_table(view_mode)
+        row_indices = self._active_global_indices if self._subset_records is None else None
+        pa_tbl = self.fixed_buffer.get_arrow_table(view_mode, row_indices=row_indices)
         if pa_tbl is None:
             return None
         return StyledArrowBackend(
             pa_tbl,
             row_styler=self._style_fixed_row_values,
             cell_styler=self._style_fixed_cell_value,
+            live_row_provider=self._live_fixed_row,
+            live_cell_provider=self._live_fixed_cell,
         )
 
     def _build_sample_arrow_backend(self, format_tag: str) -> Optional[Any]:
@@ -472,6 +538,64 @@ class VariantSplitView(Horizontal):
     def get_visible_samples(self) -> List[str]:
         return list(self.samples)
 
+    def _display_to_global_row(self, display_row: int) -> Optional[int]:
+        if self._subset_records is not None:
+            return display_row if 0 <= display_row < len(self._subset_records) else None
+        if self._active_global_indices is not None:
+            if 0 <= display_row < len(self._active_global_indices):
+                return self._active_global_indices[display_row]
+            return None
+        return display_row if 0 <= display_row < self.fixed_buffer.row_count else None
+
+    def _display_to_buffer_row(self, display_row: int) -> int:
+        if self._subset_records is not None:
+            return display_row
+        if self._active_global_indices is not None:
+            if 0 <= display_row < len(self._active_global_indices):
+                return self._active_global_indices[display_row]
+            return -1
+        return display_row
+
+    def _get_active_row_count(self) -> int:
+        if self._subset_records is not None:
+            return len(self._subset_records)
+        if self._active_global_indices is not None:
+            return len(self._active_global_indices)
+        return self.fixed_buffer.row_count
+
+    def _get_record_for_global_idx(self, global_idx: int) -> Optional[VariantRecord]:
+        if self._subset_records is not None:
+            return self._subset_records[global_idx] if 0 <= global_idx < len(self._subset_records) else None
+        if self.reader is not None:
+            if hasattr(self.reader, "get_hydrated_record"):
+                rec = self.reader.get_hydrated_record(global_idx)
+                if rec is not None:
+                    self._record_cache[global_idx] = rec
+                    if getattr(rec, "samples_loaded", False):
+                        self.fixed_buffer.update_row_metadata(global_idx, rec)
+                    return rec
+            if global_idx in self._record_cache:
+                return self._record_cache[global_idx]
+            try:
+                fetched = self.reader.get_slice(global_idx, 1, allow_placeholder=True)
+            except TypeError:
+                fetched = self.reader.get_slice(global_idx, 1)
+            if fetched:
+                self._record_cache[global_idx] = fetched[0]
+                return fetched[0]
+        return self._record_cache.get(global_idx)
+
+    def get_record_at_display_row(self, display_row: int) -> Optional[VariantRecord]:
+        if self._subset_records is not None:
+            return self._subset_records[display_row] if 0 <= display_row < len(self._subset_records) else None
+        local_idx = display_row - self._sample_window_start
+        if 0 <= local_idx < len(self.records):
+            return self.records[local_idx]
+        global_idx = self._display_to_global_row(display_row)
+        if global_idx is None:
+            return None
+        return self._get_record_for_global_idx(global_idx)
+
     def _refresh_fixed_backend(self) -> None:
         self.fixed_table.styles.width = self.FIXED_WIDTHS.get(self.view_mode, 56)
         backend = self._build_fixed_arrow_backend(self.view_mode)
@@ -482,8 +606,97 @@ class VariantSplitView(Horizontal):
         sample_cols = self.samples if self.samples else ["Samples"]
         self.sample_table.apply_arrow_backend(backend, column_labels=sample_cols)
 
+    def should_hide_sample_vertical_scrollbar(self) -> bool:
+        effective = max(
+            self._get_active_row_count(),
+            self.fixed_buffer.row_count if self._is_main_stream_view else 0,
+            self.total_records_count if self.total_records_count is not None else 0,
+            self._observed_variant_count if self._is_main_stream_view else 0,
+        )
+        return effective > self.VERTICAL_SCROLLBAR_HIDE_THRESHOLD
+
+    def _sync_sample_vertical_scrollbar(self) -> None:
+        hide_v = self.should_hide_sample_vertical_scrollbar()
+        try:
+            self.sample_table.show_vertical_scrollbar = not hide_v
+        except Exception:
+            pass
+        try:
+            self.sample_table.show_horizontal_scrollbar = True
+        except Exception:
+            pass
+        try:
+            if hide_v:
+                self.sample_table.add_class("no-vertical-scrollbar")
+                self.sample_table.styles.scrollbar_size_vertical = 0
+            else:
+                self.sample_table.remove_class("no-vertical-scrollbar")
+                self.sample_table.styles.scrollbar_size_vertical = None
+        except Exception:
+            pass
+
+    def sync_fixed_buffer_from_reader(self, wait_for_stream: bool = False) -> int:
+        """Pull any newly streamed Handle 1 sites into FixedArrowBuffer cleanly."""
+        if not self.reader or self._subset_records is not None or self._is_fetching_more:
+            return 0
+        if wait_for_stream and hasattr(self.reader, "_site_thread"):
+            st = getattr(self.reader, "_site_thread", None)
+            if st is not None and st.is_alive():
+                try:
+                    st.join(timeout=2.0)
+                except Exception:
+                    pass
+
+        if not hasattr(self.reader, "get_site_slice"):
+            return 0
+
+        loaded = self.fixed_buffer.row_count
+        new_sites = self.reader.get_site_slice(loaded)
+        if not new_sites:
+            return 0
+
+        self.fixed_buffer.append_records(new_sites)
+        self._observed_variant_count = max(self._observed_variant_count, self.fixed_buffer.row_count)
+
+        if self._is_main_stream_view and self._active_global_indices is None:
+            saved_x = getattr(self.sample_table, "scroll_x", 0)
+            saved_y = self._viewport_scroll_y
+            active_count = self._get_active_row_count()
+            safe_row = min(self.current_row_idx, active_count - 1) if active_count else 0
+            self.current_row_idx = safe_row
+
+            self._is_internal_update = True
+            try:
+                self._refresh_fixed_backend()
+                if active_count:
+                    self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
+                self.fixed_table.scroll_to(y=saved_y, animate=False, force=True)
+            except Exception:
+                pass
+            finally:
+                self._is_internal_update = False
+
+            if len(self.records) < self._get_visible_row_count():
+                self._sync_sample_viewport_window(saved_y, saved_x=saved_x)
+            else:
+                self._schedule_fixed_post_layout_scroll(target_y=saved_y, cursor_row=safe_row)
+
+            self._sync_sample_vertical_scrollbar()
+        return len(new_sites)
+
+    def update_counting_progress(self, count: int) -> None:
+        if count > self._observed_variant_count:
+            self._observed_variant_count = count
+        if self._is_main_stream_view:
+            self.sync_fixed_buffer_from_reader()
+            self._sync_sample_vertical_scrollbar()
+
     def update_total_variants(self, count: int) -> None:
         self.total_records_count = count
+        self._observed_variant_count = max(self._observed_variant_count, count)
+        if self._is_main_stream_view:
+            self.sync_fixed_buffer_from_reader()
+        self._sync_sample_vertical_scrollbar()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         event.stop()
@@ -545,11 +758,17 @@ class VariantSplitView(Horizontal):
                     heights.append(max(1, size_obj.height - hdr_h - 1))
             except Exception:
                 pass
-        return min(heights) if heights else 15
+        return min(heights) if heights else 25
 
     def _get_max_scroll_y(self) -> int:
         visible_rows = self._get_visible_row_count()
-        return max(0, len(self.records) - visible_rows)
+        return max(0, self._get_active_row_count() - visible_rows)
+
+    def _get_local_sample_cursor_row(self) -> int:
+        if not self.records:
+            return 0
+        local = self.current_row_idx - self._sample_window_start
+        return max(0, min(len(self.records) - 1, local))
 
     def _move_table_cursor(
         self,
@@ -570,14 +789,7 @@ class VariantSplitView(Horizontal):
             except Exception:
                 pass
 
-    def _schedule_post_layout_scroll(
-        self,
-        target_y: int,
-        target_x: Optional[float],
-        cursor_row: int,
-        cursor_col: int,
-    ) -> None:
-        """Restore exact scroll/cursor after FastDataTable completes a layout pass from row growth."""
+    def _schedule_fixed_post_layout_scroll(self, target_y: int, cursor_row: int) -> None:
         if self._split_view_closing:
             return
         try:
@@ -592,18 +804,12 @@ class VariantSplitView(Horizontal):
                 return
             self._is_internal_update = True
             try:
-                if self.records:
-                    safe_row = max(0, min(len(self.records) - 1, cursor_row))
-                    safe_col = max(0, min(len(self.samples) - 1, cursor_col)) if self.samples else 0
+                active_count = self._get_active_row_count()
+                if active_count:
+                    safe_row = max(0, min(active_count - 1, cursor_row))
                     self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-                    self._move_table_cursor(self.sample_table, row=safe_row, column=safe_col, scroll=False)
                 clamped_y = max(0, min(self._get_max_scroll_y(), target_y))
-                self._viewport_scroll_y = clamped_y
                 self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
-                if target_x is not None:
-                    self.sample_table.scroll_to(x=target_x, y=clamped_y, animate=False, force=True)
-                else:
-                    self.sample_table.scroll_to(y=clamped_y, animate=False, force=True)
             except Exception:
                 pass
             finally:
@@ -614,24 +820,152 @@ class VariantSplitView(Horizontal):
         except Exception:
             pass
 
+    def _schedule_post_layout_scroll(
+        self,
+        target_y: int,
+        target_x: Optional[float],
+        cursor_row: int,
+        cursor_col: int,
+    ) -> None:
+        """Restore exact scroll/cursor after layout passes without drifting SampleMatrixTable."""
+        if self._split_view_closing:
+            return
+        try:
+            app_obj = self.app
+            if app_obj is None or getattr(app_obj, "_vcfscape_closing", False):
+                return
+        except Exception:
+            return
+
+        def _restore() -> None:
+            if self._split_view_closing:
+                return
+            self._is_internal_update = True
+            try:
+                active_count = self._get_active_row_count()
+                if active_count:
+                    safe_row = max(0, min(active_count - 1, cursor_row))
+                    self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
+                clamped_y = max(0, min(self._get_max_scroll_y(), target_y))
+                self._viewport_scroll_y = clamped_y
+                self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
+
+                if self.records:
+                    local_row = self._get_local_sample_cursor_row()
+                    safe_col = max(0, min(len(self.samples) - 1, cursor_col)) if self.samples else 0
+                    self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
+                if target_x is not None:
+                    self.sample_table.scroll_to(x=target_x, y=0, animate=False, force=True)
+                else:
+                    self.sample_table.scroll_to(y=0, animate=False, force=True)
+            except Exception:
+                pass
+            finally:
+                self._is_internal_update = False
+
+        try:
+            self.call_after_refresh(_restore)
+        except Exception:
+            pass
+
+    def _sync_sample_viewport_window(
+        self,
+        viewport_top: int,
+        saved_x: Optional[float] = None,
+        force_rebind: bool = False,
+    ) -> None:
+        """
+        Manually fill SampleMatrixTable's fixed viewport buffer for display rows
+        [viewport_top, viewport_top + viewport_rows). Keeps sample_table.scroll_y pinned at 0
+        and avoids backend swaps during steady scrolling so horizontal scroll_x stays intact.
+        """
+        active_count = self._get_active_row_count()
+        visible_rows = max(1, self._get_visible_row_count())
+        max_top = max(0, active_count - visible_rows)
+        clamped_top = max(0, min(max_top, int(viewport_top)))
+        self._viewport_scroll_y = clamped_top
+
+        slice_end = min(active_count, clamped_top + visible_rows)
+        window_records: List[VariantRecord] = []
+        window_global_indices: List[int] = []
+        unhydrated_global_indices: List[int] = []
+
+        for d_idx in range(clamped_top, slice_end):
+            g_idx = self._display_to_global_row(d_idx)
+            if g_idx is None:
+                continue
+            window_global_indices.append(g_idx)
+            rec = self._get_record_for_global_idx(g_idx)
+            if rec is not None:
+                window_records.append(rec)
+                if not getattr(rec, "samples_loaded", True):
+                    unhydrated_global_indices.append(g_idx)
+
+        self._sample_window_start = clamped_top
+        self._sample_window_global_indices = window_global_indices
+        self.records = window_records
+
+        prev_sample_rows = getattr(self.sample_table, "row_count", -1)
+        prev_backend = getattr(self.sample_table, "backend", None)
+        x_to_keep = getattr(self.sample_table, "scroll_x", 0) if saved_x is None else saved_x
+        local_row = self._get_local_sample_cursor_row()
+        safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
+
+        self.sample_buffer.reset(self.records, samples=self.samples)
+
+        def _apply() -> None:
+            if force_rebind or prev_backend is None or prev_sample_rows != len(self.records):
+                self._refresh_sample_backend()
+            else:
+                _clear_table_render_caches(self.sample_table)
+                try:
+                    self.sample_table.refresh()
+                except Exception:
+                    pass
+            if self.records:
+                self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
+            try:
+                self.sample_table.scroll_to(x=x_to_keep, y=0, animate=False, force=True)
+            except Exception:
+                pass
+
+        self._is_internal_update = True
+        try:
+            self._run_batched(_apply)
+        finally:
+            self._is_internal_update = False
+
+        if (
+            unhydrated_global_indices
+            and self.reader is not None
+            and self.samples
+            and self._subset_records is None
+            and hasattr(self.reader, "request_sample_hydration")
+        ):
+            req_start = min(unhydrated_global_indices)
+            req_span = max(unhydrated_global_indices) - req_start + 1
+            self.reader.request_sample_hydration(req_start, req_span)
+
     def _command_tables_scroll_y(self, target_y: int) -> None:
-        """Scroll both FixedVariantTable and SampleMatrixTable to the exact same vertical offset."""
+        """Align FixedVariantTable scroll_y and SampleMatrixTable fixed viewport window to target_y."""
         max_y = self._get_max_scroll_y()
         clamped_y = max(0, min(max_y, int(target_y)))
-        self._viewport_scroll_y = clamped_y
+        saved_x = getattr(self.sample_table, "scroll_x", 0)
 
-        def _apply():
-            saved_x = getattr(self.sample_table, "scroll_x", 0)
+        self._sync_sample_viewport_window(clamped_y, saved_x=saved_x)
+
+        self._is_internal_update = True
+        try:
             try:
                 self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
             except Exception:
                 pass
             try:
-                self.sample_table.scroll_to(x=saved_x, y=clamped_y, animate=False, force=True)
+                self.sample_table.scroll_to(x=saved_x, y=0, animate=False, force=True)
             except Exception:
                 pass
-
-        self._run_batched(_apply)
+        finally:
+            self._is_internal_update = False
 
     def _run_batched(self, fn: Callable[[], None]) -> None:
         batch_ctx = None
@@ -648,20 +982,20 @@ class VariantSplitView(Horizontal):
             fn()
 
     def _request_viewport_hydration(self, start_row: int) -> None:
-        """Ask Handle 2 to hydrate only rows near the active visible viewport."""
-        if not self.reader or not self.samples or not self._is_main_stream_view:
+        """Ask Handle 2 to hydrate only global rows mapped to the visible viewport."""
+        if not self.reader or not self.samples or self._subset_records is not None:
             return
         if not hasattr(self.reader, "request_sample_hydration"):
             return
-        visible_rows = self._get_visible_row_count()
-        win_start = max(0, start_row - 10)
-        win_end = min(len(self.records), start_row + visible_rows + 20)
-        has_unhydrated = any(
-            not getattr(self.records[i], "samples_loaded", True)
-            for i in range(win_start, win_end)
-        )
-        if has_unhydrated:
-            self.reader.request_sample_hydration(win_start, max(1, win_end - win_start))
+        missing_global = [
+            self._sample_window_global_indices[i]
+            for i, rec in enumerate(self.records)
+            if i < len(self._sample_window_global_indices) and not getattr(rec, "samples_loaded", True)
+        ]
+        if missing_global:
+            req_start = min(missing_global)
+            req_span = max(missing_global) - req_start + 1
+            self.reader.request_sample_hydration(req_start, req_span)
 
     # --- Top-Widget Keyboard & Mouse Wheel Capture ---
 
@@ -708,38 +1042,30 @@ class VariantSplitView(Horizontal):
         self.handle_mouse_scroll(delta=-3)
 
     def handle_mouse_scroll(self, delta: int) -> None:
-        """Scroll ONLY the vertical viewport of both tables in lockstep without moving cursor."""
-        if not self.records:
+        """Slide both tables vertically in lockstep using FixedVariantTable + SampleMatrixTable viewport window."""
+        if self._get_active_row_count() == 0:
             return
         visible_rows = self._get_visible_row_count()
         target_y = max(0, self._viewport_scroll_y + delta)
 
-        did_fetch = False
-        if delta > 0 and self._is_main_stream_view:
-            while target_y + visible_rows >= len(self.records) - 15:
+        if delta > 0 and self._is_main_stream_view and self._active_global_indices is None:
+            self.sync_fixed_buffer_from_reader()
+            while target_y + visible_rows >= self._get_active_row_count() - 15:
                 if not self.fetch_more_rows(100):
                     break
-                did_fetch = True
 
         self._command_tables_scroll_y(target_y)
-        if did_fetch:
-            safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
-            self._schedule_post_layout_scroll(
-                target_y=self._viewport_scroll_y,
-                target_x=getattr(self.sample_table, "scroll_x", 0),
-                cursor_row=self.current_row_idx,
-                cursor_col=safe_col,
-            )
-        self._request_viewport_hydration(self._viewport_scroll_y)
+        self._schedule_fixed_post_layout_scroll(target_y=self._viewport_scroll_y, cursor_row=self.current_row_idx)
 
     # --- Vertical & Horizontal Navigation ---
 
     def navigate_rows(self, delta: int) -> None:
-        if not self.records:
+        if self._get_active_row_count() == 0:
             return
         target = self.current_row_idx + delta
-        if delta > 0 and self.total_records_count is not None and target >= self.total_records_count:
-            target = max(0, self.total_records_count - 1)
+        known_total = self._get_known_total_count()
+        if delta > 0 and known_total is not None and target >= known_total:
+            target = max(0, known_total - 1)
         if target < 0:
             target = 0
         self.set_active_row(target, sync_fixed=True, sync_sample=True)
@@ -750,8 +1076,9 @@ class VariantSplitView(Horizontal):
 
     def can_advance_row(self, forward: bool) -> bool:
         if forward:
-            if self.total_records_count is not None:
-                return self.current_row_idx < self.total_records_count - 1
+            known_total = self._get_known_total_count()
+            if known_total is not None:
+                return self.current_row_idx < known_total - 1
             return True
         return self.current_row_idx > 0
 
@@ -761,21 +1088,28 @@ class VariantSplitView(Horizontal):
     def set_active_row(self, target_row: int, sync_fixed: bool = True, sync_sample: bool = True) -> None:
         if target_row < 0:
             target_row = 0
-        if self.total_records_count is not None and target_row >= self.total_records_count:
-            target_row = max(0, self.total_records_count - 1)
+        known_total = self._get_known_total_count()
+        if known_total is not None and target_row >= known_total:
+            target_row = max(0, known_total - 1)
 
-        if self.reader and self._is_main_stream_view and hasattr(self.reader, "set_focus_row"):
-            self.reader.set_focus_row(target_row)
+        if self.reader and self._is_main_stream_view and self._active_global_indices is None:
+            self.sync_fixed_buffer_from_reader()
+            if hasattr(self.reader, "set_focus_row"):
+                self.reader.set_focus_row(target_row)
 
         did_fetch = False
-        while self._is_main_stream_view and len(self.records) <= target_row + 25:
-            needed = max(100, target_row - len(self.records) + 50)
-            if not self.fetch_more_rows(needed):
-                break
-            did_fetch = True
+        if self._is_main_stream_view and self._active_global_indices is None:
+            while self._get_active_row_count() <= target_row + 25:
+                needed = max(100, target_row - self._get_active_row_count() + 50)
+                if not self.fetch_more_rows(needed):
+                    break
+                did_fetch = True
 
-        if target_row >= len(self.records):
-            target_row = max(0, len(self.records) - 1)
+        active_count = self._get_active_row_count()
+        if active_count == 0:
+            return
+        if target_row >= active_count:
+            target_row = active_count - 1
 
         self.current_row_idx = target_row
 
@@ -786,22 +1120,31 @@ class VariantSplitView(Horizontal):
         elif target_row >= target_y + visible_rows:
             target_y = target_row - visible_rows + 1
         target_y = max(0, min(self._get_max_scroll_y(), target_y))
-        self._viewport_scroll_y = target_y
 
-        self._request_viewport_hydration(target_y)
+        saved_x = getattr(self.sample_table, "scroll_x", 0)
+        needs_sample_window_refresh = (
+            target_y != self._sample_window_start
+            or not self.records
+            or getattr(self.sample_table, "row_count", 0) == 0
+        )
+
+        if needs_sample_window_refresh:
+            self._sync_sample_viewport_window(target_y, saved_x=saved_x)
+        else:
+            self._viewport_scroll_y = target_y
 
         self._is_internal_update = True
         safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
-        saved_x = getattr(self.sample_table, "scroll_x", 0)
+        local_row = self._get_local_sample_cursor_row()
 
-        def _apply():
+        def _apply() -> None:
             if sync_fixed and getattr(self.fixed_table, "row_count", 0) > target_row:
                 self._move_table_cursor(self.fixed_table, row=target_row, scroll=False)
-            if sync_sample and getattr(self.sample_table, "row_count", 0) > target_row:
-                self._move_table_cursor(self.sample_table, row=target_row, column=safe_col, scroll=False)
+            if sync_sample and getattr(self.sample_table, "row_count", 0) > local_row:
+                self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
             try:
                 self.fixed_table.scroll_to(y=target_y, animate=False, force=True)
-                self.sample_table.scroll_to(x=saved_x, y=target_y, animate=False, force=True)
+                self.sample_table.scroll_to(x=saved_x, y=0, animate=False, force=True)
             except Exception:
                 pass
 
@@ -811,12 +1154,7 @@ class VariantSplitView(Horizontal):
             self._is_internal_update = False
 
         if did_fetch:
-            self._schedule_post_layout_scroll(
-                target_y=target_y,
-                target_x=saved_x,
-                cursor_row=target_row,
-                cursor_col=safe_col,
-            )
+            self._schedule_fixed_post_layout_scroll(target_y=target_y, cursor_row=target_row)
 
         self._notify_selection(target_row, self.current_sample_idx)
 
@@ -845,30 +1183,38 @@ class VariantSplitView(Horizontal):
         global_col: int,
         horizontal_align: Optional[str] = None,
     ) -> None:
-        """Move sample cursor across native FastDataTable columns cleanly without clobbering scroll_x."""
+        """Move sample cursor horizontally across SampleMatrixTable at current local viewport row."""
         if not self.samples:
             return
         global_col = max(0, min(len(self.samples) - 1, global_col))
         self.current_sample_idx = global_col
+        local_row = self._get_local_sample_cursor_row()
 
         self._is_internal_update = True
         try:
-            self._move_table_cursor(
-                self.sample_table,
-                row=self.current_row_idx,
-                column=global_col,
-                scroll=True,
-            )
+            if getattr(self.sample_table, "row_count", 0) > local_row:
+                self._move_table_cursor(
+                    self.sample_table,
+                    row=local_row,
+                    column=global_col,
+                    scroll=True,
+                )
             if horizontal_align == "home":
                 try:
-                    self.sample_table.scroll_to(x=0, animate=False, force=True)
+                    self.sample_table.scroll_to(x=0, y=0, animate=False, force=True)
                 except Exception:
                     pass
             elif horizontal_align == "end":
                 try:
                     max_x = max(0, int(getattr(self.sample_table, "max_scroll_x", 0) or 0))
                     if max_x > 0:
-                        self.sample_table.scroll_to(x=max_x, animate=False, force=True)
+                        self.sample_table.scroll_to(x=max_x, y=0, animate=False, force=True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    if getattr(self.sample_table, "scroll_y", 0) != 0:
+                        self.sample_table.scroll_to(y=0, animate=False, force=True)
                 except Exception:
                     pass
         finally:
@@ -876,14 +1222,23 @@ class VariantSplitView(Horizontal):
 
         self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
-    # --- Data Loading, View Modes, and In-Place Hydration ---
+    # --- Data Loading, Filtering, View Modes, and In-Place Hydration ---
 
     def fetch_more_rows(self, batch_size: int = 100) -> bool:
-        """Dynamically append rows to both ArrowBackends without losing scroll or cursor."""
-        if not self.reader or self._is_fetching_more or not self._is_main_stream_view:
+        """Pull newly streamed site rows into FixedArrowBuffer (supporting both Handle 1 and MockReader)."""
+        if (
+            not self.reader
+            or self._is_fetching_more
+            or not self._is_main_stream_view
+            or self._active_global_indices is not None
+            or self._subset_records is not None
+        ):
             return False
 
-        current_loaded = len(self.records)
+        if self.sync_fixed_buffer_from_reader() > 0:
+            return True
+
+        current_loaded = self.fixed_buffer.row_count
         if self.total_records_count is not None and current_loaded >= self.total_records_count:
             return False
 
@@ -899,28 +1254,27 @@ class VariantSplitView(Horizontal):
                     self.total_records_count = current_loaded
                 return False
 
-            self.records.extend(new_slice)
+            for off, rec in enumerate(new_slice):
+                self._record_cache[current_loaded + off] = rec
             self.fixed_buffer.append_records(new_slice)
-            self.sample_buffer.append_records(new_slice)
 
             if len(new_slice) < batch_size and self.total_records_count is None:
-                self.total_records_count = len(self.records)
+                self.total_records_count = self.fixed_buffer.row_count
+
+            self._observed_variant_count = max(self._observed_variant_count, self.fixed_buffer.row_count)
 
             self._is_internal_update = True
             saved_x = getattr(self.sample_table, "scroll_x", 0)
             saved_y = self._viewport_scroll_y
-            safe_row = min(self.current_row_idx, len(self.records) - 1) if self.records else 0
-            safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
+            active_count = self._get_active_row_count()
+            safe_row = min(self.current_row_idx, active_count - 1) if active_count else 0
 
-            def _apply():
+            def _apply() -> None:
                 self._refresh_fixed_backend()
-                self._refresh_sample_backend()
-                if self.records:
+                if active_count:
                     self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-                    self._move_table_cursor(self.sample_table, row=safe_row, column=safe_col, scroll=False)
                 try:
                     self.fixed_table.scroll_to(y=saved_y, animate=False, force=True)
-                    self.sample_table.scroll_to(x=saved_x, y=saved_y, animate=False, force=True)
                 except Exception:
                     pass
 
@@ -929,22 +1283,22 @@ class VariantSplitView(Horizontal):
             finally:
                 self._is_internal_update = False
 
-            self._schedule_post_layout_scroll(
-                target_y=saved_y,
-                target_x=saved_x,
-                cursor_row=safe_row,
-                cursor_col=safe_col,
-            )
+            if len(self.records) < self._get_visible_row_count():
+                self._sync_sample_viewport_window(saved_y, saved_x=saved_x)
+            else:
+                self._schedule_fixed_post_layout_scroll(target_y=saved_y, cursor_row=safe_row)
+
+            self._sync_sample_vertical_scrollbar()
             return True
         finally:
             self._is_fetching_more = False
 
     def hydrate_rows(self, row_indices: List[int]) -> None:
         """
-        Repaint newly hydrated sample rows in place WITHOUT calling set_backend()
-        so FastDataTable preserves cursor coordinates, scroll_x, scroll_y, and virtual_size.
+        Map incoming global Handle 2 row indices to local viewport rows inside SampleMatrixTable
+        and repaint in place without replacing sample_table.backend.
         """
-        if self._split_view_closing or not self.reader or not self._is_main_stream_view:
+        if self._split_view_closing or not self.reader or self._subset_records is not None:
             return
         try:
             if getattr(self.app, "_vcfscape_closing", False):
@@ -954,32 +1308,132 @@ class VariantSplitView(Horizontal):
         if not hasattr(self.reader, "get_hydrated_record"):
             return
 
-        hydrated_map: Dict[int, VariantRecord] = {}
-        updated_current = False
-        for idx in row_indices:
-            if 0 <= idx < len(self.records) and not self.sample_buffer.is_row_hydrated(idx):
-                hydrated = self.reader.get_hydrated_record(idx)
-                if hydrated is not None and getattr(hydrated, "samples_loaded", False):
-                    self.records[idx] = hydrated
-                    hydrated_map[idx] = hydrated
-                    if idx == self.current_row_idx:
-                        updated_current = True
+        global_to_local: Dict[int, List[int]] = {}
+        for local_idx, g_idx in enumerate(self._sample_window_global_indices):
+            global_to_local.setdefault(g_idx, []).append(local_idx)
 
-        if not hydrated_map or self._split_view_closing:
+        hydrated_local_map: Dict[int, VariantRecord] = {}
+        updated_current = False
+        fixed_meta_changed = False
+        current_global = self._display_to_global_row(self.current_row_idx)
+
+        for g_idx in row_indices:
+            hydrated = self.reader.get_hydrated_record(g_idx)
+            if hydrated is None or not getattr(hydrated, "samples_loaded", False):
+                continue
+            self._record_cache[g_idx] = hydrated
+            if self.fixed_buffer.update_row_metadata(g_idx, hydrated):
+                fixed_meta_changed = True
+            for local_idx in global_to_local.get(g_idx, ()):
+                if 0 <= local_idx < len(self.records):
+                    self.records[local_idx] = hydrated
+                    hydrated_local_map[local_idx] = hydrated
+            if g_idx == current_global:
+                updated_current = True
+
+        if self._split_view_closing:
             return
 
-        if self.sample_buffer.hydrate_rows(list(hydrated_map.keys()), hydrated_map):
-            _clear_table_render_caches(self.sample_table)
+        if hydrated_local_map:
+            if self.sample_buffer.hydrate_rows(list(hydrated_local_map.keys()), hydrated_local_map):
+                _clear_table_render_caches(self.sample_table)
+                try:
+                    self.sample_table.refresh()
+                except Exception:
+                    pass
+
+        if fixed_meta_changed:
+            _clear_table_render_caches(self.fixed_table)
             try:
-                self.sample_table.refresh()
+                self.fixed_table.refresh()
             except Exception:
                 pass
 
-        if updated_current and not self._split_view_closing and 0 <= self.current_row_idx < len(self.records):
+        if updated_current and not self._split_view_closing:
             self._last_notified = None
             self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
+    def _apply_global_indices(
+        self,
+        matched_indices: Optional[List[int]],
+        is_main_stream: bool,
+    ) -> int:
+        """Switch view between full FixedArrowBuffer and a filtered/jumped global index subset."""
+        self._subset_records = None
+        self._active_global_indices = matched_indices
+        self._is_main_stream_view = is_main_stream
+        self.current_row_idx = 0
+        self._viewport_scroll_y = 0
+
+        if is_main_stream and matched_indices is None and self.reader:
+            if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
+                self.total_records_count = self.reader.get_total_variants_async()
+            elif hasattr(self.reader, "total_variants_ready") and self.reader.total_variants_ready:
+                self.total_records_count = self.reader.total_variants
+            else:
+                self.total_records_count = None
+        else:
+            self.total_records_count = self._get_active_row_count()
+
+        self._observed_variant_count = (
+            self.total_records_count if self.total_records_count is not None else self._get_active_row_count()
+        )
+        self._sync_sample_vertical_scrollbar()
+
+        self._is_internal_update = True
+        try:
+            self._refresh_fixed_backend()
+            if self._get_active_row_count() > 0:
+                self._move_table_cursor(self.fixed_table, row=0, scroll=False)
+            self.fixed_table.scroll_to(y=0, animate=False, force=True)
+        except Exception:
+            pass
+        finally:
+            self._is_internal_update = False
+
+        self._sync_sample_viewport_window(0, saved_x=0, force_rebind=True)
+        self._last_notified = None
+        self._notify_selection(0, self.current_sample_idx)
+        return self._get_active_row_count()
+
+    def apply_filter(
+        self,
+        min_qual: Optional[float] = None,
+        variant_type: Optional[str] = None,
+        filter_status: Optional[str] = None,
+        search_query: Optional[str] = None,
+    ) -> int:
+        """Filter directly in-memory against FixedArrowBuffer and hydrate only visible matches."""
+        if self.reader is not None:
+            self.sync_fixed_buffer_from_reader(wait_for_stream=True)
+
+        is_all = (
+            (variant_type is None or variant_type.upper() == "ALL")
+            and min_qual is None
+            and (filter_status is None or filter_status.upper() == "ALL")
+            and not search_query
+        )
+        if is_all:
+            return self._apply_global_indices(None, is_main_stream=True)
+
+        matched = self.fixed_buffer.filter_indices(
+            min_qual=min_qual,
+            variant_type=variant_type,
+            filter_status=filter_status,
+            search_query=search_query,
+        )
+        return self._apply_global_indices(matched, is_main_stream=False)
+
     def jump_to_region(self, chrom: str, pos: int) -> bool:
+        if self.reader is not None:
+            self.sync_fixed_buffer_from_reader()
+        matched = self.fixed_buffer.find_region_indices(chrom, pos, pos + 500000, limit=500)
+        if not matched:
+            matched = self.fixed_buffer.find_region_indices(chrom, max(0, pos - 100000), pos + 100000, limit=500)
+        if matched:
+            self._apply_global_indices(matched, is_main_stream=False)
+            return True
+
         if not self.reader:
             return False
         records = self.reader.query_region(chrom, pos, pos + 500000, limit=self.window_size)
@@ -992,67 +1446,73 @@ class VariantSplitView(Horizontal):
 
     def set_records(self, records: List[VariantRecord], is_main_stream: bool = False):
         self._is_main_stream_view = is_main_stream
-        self.records = list(records)
+        self._active_global_indices = None
         self.current_row_idx = 0
         self._viewport_scroll_y = 0
-        if is_main_stream and self.reader:
-            if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
-                self.total_records_count = self.reader.get_total_variants_async()
-            elif hasattr(self.reader, "total_variants_ready") and self.reader.total_variants_ready:
-                self.total_records_count = self.reader.total_variants
-            else:
-                self.total_records_count = None
-        else:
-            self.total_records_count = len(self.records)
 
-        self.fixed_buffer.reset(self.records)
-        self.sample_buffer.reset(self.records, samples=self.samples)
+        if is_main_stream:
+            self._subset_records = None
+            self._record_cache.clear()
+            for idx, rec in enumerate(records):
+                self._record_cache[idx] = rec
+            self.fixed_buffer.reset(records)
+            if self.reader is not None:
+                self.sync_fixed_buffer_from_reader()
+            if self.reader:
+                if hasattr(self.reader, "get_total_variants_async") and self.reader.get_total_variants_async() is not None:
+                    self.total_records_count = self.reader.get_total_variants_async()
+                elif hasattr(self.reader, "total_variants_ready") and self.reader.total_variants_ready:
+                    self.total_records_count = self.reader.total_variants
+                else:
+                    self.total_records_count = None
+            else:
+                self.total_records_count = self.fixed_buffer.row_count
+        else:
+            self._subset_records = list(records)
+            self.fixed_buffer.reset(self._subset_records)
+            self.total_records_count = len(self._subset_records)
+
+        self._observed_variant_count = (
+            self.total_records_count if self.total_records_count is not None else self._get_active_row_count()
+        )
+        self._sync_sample_vertical_scrollbar()
+
         self._is_internal_update = True
-        safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
         try:
             self._refresh_fixed_backend()
-            self._refresh_sample_backend()
-            if self.records:
+            if self._get_active_row_count() > 0:
                 self._move_table_cursor(self.fixed_table, row=0, scroll=False)
-                self._move_table_cursor(self.sample_table, row=0, column=safe_col, scroll=False)
-            self._command_tables_scroll_y(0)
+            self.fixed_table.scroll_to(y=0, animate=False, force=True)
+        except Exception:
+            pass
         finally:
             self._is_internal_update = False
 
-        self._schedule_post_layout_scroll(
-            target_y=0,
-            target_x=0,
-            cursor_row=0,
-            cursor_col=safe_col,
-        )
+        self._sync_sample_viewport_window(0, saved_x=0, force_rebind=True)
         self._last_notified = None
         self._notify_selection(0, self.current_sample_idx)
 
     def set_view_mode(self, mode: str):
         self.view_mode = mode.lower()
         saved_y = self._viewport_scroll_y
-        safe_row = min(self.current_row_idx, len(self.records) - 1) if self.records else 0
-        safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
+        active_count = self._get_active_row_count()
+        safe_row = min(self.current_row_idx, active_count - 1) if active_count else 0
         self._is_internal_update = True
         try:
             self._refresh_fixed_backend()
-            if self.records:
+            if active_count:
                 self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-            self._command_tables_scroll_y(saved_y)
+            self.fixed_table.scroll_to(y=saved_y, animate=False, force=True)
+        except Exception:
+            pass
         finally:
             self._is_internal_update = False
-        self._schedule_post_layout_scroll(
-            target_y=saved_y,
-            target_x=getattr(self.sample_table, "scroll_x", 0),
-            cursor_row=safe_row,
-            cursor_col=safe_col,
-        )
+        self._schedule_fixed_post_layout_scroll(target_y=saved_y, cursor_row=safe_row)
 
     def set_format_tag(self, tag: str):
         self.format_tag = tag.upper()
         saved_x = getattr(self.sample_table, "scroll_x", 0)
-        saved_y = self._viewport_scroll_y
-        safe_row = min(self.current_row_idx, len(self.records) - 1) if self.records else 0
+        local_row = self._get_local_sample_cursor_row()
         safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
         _clear_table_render_caches(self.sample_table)
         try:
@@ -1061,12 +1521,12 @@ class VariantSplitView(Horizontal):
             pass
         if getattr(self.sample_table, "backend", None) is None:
             self._refresh_sample_backend()
-        self._schedule_post_layout_scroll(
-            target_y=saved_y,
-            target_x=saved_x,
-            cursor_row=safe_row,
-            cursor_col=safe_col,
-        )
+        if self.records:
+            self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
+        try:
+            self.sample_table.scroll_to(x=saved_x, y=0, animate=False, force=True)
+        except Exception:
+            pass
 
     def cycle_view_mode(self) -> str:
         modes = ["normal", "compact", "essential", "raw"]
@@ -1080,11 +1540,20 @@ class VariantSplitView(Horizontal):
         try:
             self._last_notified = None
             self._refresh_fixed_backend()
-            self.sample_buffer.reset(self.records, samples=self.samples)
-            self._refresh_sample_backend()
+            self._sync_sample_viewport_window(self._viewport_scroll_y, force_rebind=True)
+            self._sync_sample_vertical_scrollbar()
             self._notify_selection(self.current_row_idx, self.current_sample_idx)
         finally:
             self._rebuilding = False
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self._split_view_closing or self._rebuilding:
+            return
+        if self._get_active_row_count() > 0:
+            self._sync_sample_viewport_window(
+                self._viewport_scroll_y,
+                saved_x=getattr(self.sample_table, "scroll_x", 0),
+            )
 
     # --- Click-only selection sync (ignores programmatic cursor moves) ---
 
@@ -1108,18 +1577,19 @@ class VariantSplitView(Horizontal):
         self._disarm_click_sync()
         tbl = getattr(event, "data_table", None) or getattr(event, "control", None)
         if tbl is not None and getattr(tbl, "id", None) == "sample_table":
-            target_row = event.coordinate.row
-            self.current_sample_idx = event.coordinate.column
-            self.set_active_row(target_row, sync_fixed=True, sync_sample=False)
+            local_row = int(event.coordinate.row)
+            target_display_row = self._sample_window_start + local_row
+            self.current_sample_idx = int(event.coordinate.column)
+            self.set_active_row(target_display_row, sync_fixed=True, sync_sample=False)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int) -> None:
         if self._split_view_closing:
             return
-        if 0 <= row_idx < len(self.records):
+        rec = self.get_record_at_display_row(row_idx)
+        if rec is not None:
             coord = (row_idx, sample_col_idx)
             if self._last_notified == coord:
                 return
             self._last_notified = coord
-            rec = self.records[row_idx]
             sample_id = self.samples[sample_col_idx] if 0 <= sample_col_idx < len(self.samples) else None
             self.post_message(self.VariantSelected(rec, sample_id, row_index=row_idx))

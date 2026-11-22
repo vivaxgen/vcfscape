@@ -714,6 +714,24 @@ class VcfReader:
     def get_total_variants_async(self) -> Optional[int]:
         return self._total_variants_count
 
+    def get_site_count(self) -> int:
+        """Return number of Handle 1 site rows currently available in memory."""
+        if self._records:
+            return len(self._records)
+        with self._site_lock:
+            return len(self._site_records)
+
+    def get_site_slice(self, offset: int = 0, limit: Optional[int] = None) -> List[Any]:
+        """Return raw Handle 1 site objects (_MinimalSite or VariantRecord) without extra allocation."""
+        if offset < 0:
+            offset = 0
+        if self._records:
+            return self._records[offset:] if limit is None else self._records[offset: offset + limit]
+        with self._site_lock:
+            if limit is None:
+                return list(self._site_records[offset:])
+            return list(self._site_records[offset: offset + limit])
+
     def _wait_for_site_index(self, target_count: int) -> None:
         while not self._site_stream_done and not self._stop_event.is_set() and not self._stop_workers:
             with self._site_lock:

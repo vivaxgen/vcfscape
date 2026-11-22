@@ -254,6 +254,8 @@ class VcfscapeApp(App):
         if self._vcfscape_closing:
             return
         self.header_bar.counting_progress = count
+        if hasattr(self.table_widget, "update_counting_progress"):
+            self.table_widget.update_counting_progress(count)
         self.footer_bar.set_log(f"Indexing variants in background: {count:,} sites...")
 
     def _on_total_variants_ready(self, total: int) -> None:
@@ -338,8 +340,13 @@ class VcfscapeApp(App):
         def on_dismiss(saved: bool | None):
             if saved:
                 self.sidebar_panel.cohort_widget.refresh()
-                if self.table_widget.records:
-                    self.stats_pane.update_stats(self.table_widget.records[0])
+                active_rec = (
+                    self.table_widget.get_record_at_display_row(self.table_widget.current_row_idx)
+                    if hasattr(self.table_widget, "get_record_at_display_row")
+                    else (self.table_widget.records[0] if self.table_widget.records else None)
+                )
+                if active_rec is not None:
+                    self.stats_pane.update_stats(active_rec)
                 self.footer_bar.set_log("Cohort updates saved and applied successfully.")
             try:
                 self.table_widget.focus()
@@ -360,8 +367,13 @@ class VcfscapeApp(App):
             state_label = "ACTIVE" if new_state else "INACTIVE"
             self.footer_bar.set_log(f"Cohort [{target}] toggled to {state_label}.")
             self.sidebar_panel.cohort_widget.refresh()
-            if self.table_widget.records:
-                self.stats_pane.update_stats(self.table_widget.records[0])
+            active_rec = (
+                self.table_widget.get_record_at_display_row(self.table_widget.current_row_idx)
+                if hasattr(self.table_widget, "get_record_at_display_row")
+                else (self.table_widget.records[0] if self.table_widget.records else None)
+            )
+            if active_rec is not None:
+                self.stats_pane.update_stats(active_rec)
         else:
             self.footer_bar.set_log("No custom cohorts defined. Press 'c' to open Cohort Manager.")
 
@@ -371,11 +383,14 @@ class VcfscapeApp(App):
         self.current_filter = filters[(curr_idx + 1) % len(filters)]
 
         if self.current_filter == "ALL":
-            try:
-                initial_records = self.reader.get_slice(0, 150, allow_placeholder=True)
-            except TypeError:
-                initial_records = self.reader.get_slice(0, 150)
-            self.table_widget.set_records(initial_records, is_main_stream=True)
+            if hasattr(self.table_widget, "apply_filter"):
+                self.table_widget.apply_filter(variant_type="ALL")
+            else:
+                try:
+                    initial_records = self.reader.get_slice(0, 150, allow_placeholder=True)
+                except TypeError:
+                    initial_records = self.reader.get_slice(0, 150)
+                self.table_widget.set_records(initial_records, is_main_stream=True)
             total = self.reader.get_total_variants_async() if hasattr(self.reader, "get_total_variants_async") else None
             if total is None and getattr(self.reader, "total_variants_ready", False):
                 total = self.reader.total_variants
@@ -384,11 +399,15 @@ class VcfscapeApp(App):
             total_str = f"{total:,}" if isinstance(total, int) else "streaming"
             self.footer_bar.set_log(f"Filter set to [ALL]. Displaying {total_str} variants.")
         else:
-            filtered_records = self.reader.filter_records(variant_type=self.current_filter)
-            self.table_widget.set_records(filtered_records, is_main_stream=False)
-            self.header_bar.total_variants = len(filtered_records)
+            if hasattr(self.table_widget, "apply_filter"):
+                matched_count = self.table_widget.apply_filter(variant_type=self.current_filter)
+            else:
+                filtered_records = self.reader.filter_records(variant_type=self.current_filter)
+                self.table_widget.set_records(filtered_records, is_main_stream=False)
+                matched_count = len(filtered_records)
+            self.header_bar.total_variants = matched_count
             self.sidebar_panel.cohort_widget.set_filter(self.current_filter)
-            self.footer_bar.set_log(f"Filter set to [{self.current_filter}]. Displaying {len(filtered_records)} variants.")
+            self.footer_bar.set_log(f"Filter set to [{self.current_filter}]. Displaying {matched_count:,} variants.")
 
     def action_toggle_theme(self):
         """Toggle between Dark and Light mode."""

@@ -47,6 +47,11 @@ SampleMatrixTable,
     background: #0b0f17;
 }
 
+SampleMatrixTable.no-vertical-scrollbar,
+#sample_table.no-vertical-scrollbar {
+    scrollbar-size-vertical: 0;
+}
+
 FixedVariantTable > .datatable--cursor,
 SampleMatrixTable > .datatable--cursor,
 #fixed_table > .datatable--cursor,

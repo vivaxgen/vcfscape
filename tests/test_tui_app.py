@@ -231,13 +231,23 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(app.screen_stack), 1)
                 self.assertIs(app.focused, app.table_widget)
 
-                # Vertical & horizontal navigation across big gzipped VCF
+                # For >1000 variant rows, SampleMatrixTable hides vertical scrollbar only
+                self.assertFalse(app.table_widget.sample_table.show_vertical_scrollbar)
+                self.assertTrue(app.table_widget.sample_table.show_horizontal_scrollbar)
+                self.assertTrue(app.table_widget.sample_table.has_class("no-vertical-scrollbar"))
+
+                # Vertical & horizontal navigation across big gzipped VCF still work cleanly
                 await pilot.press("pagedown", "pagedown", "down")
                 await pilot.pause()
                 self.assertGreater(app.table_widget.current_row_idx, 30)
                 self.assertEqual(
-                    app.table_widget.sample_table.cursor_coordinate.row,
+                    app.table_widget.fixed_table.cursor_coordinate.row,
                     app.table_widget.current_row_idx,
+                )
+                self.assertEqual(app.table_widget.sample_table.scroll_y, 0)
+                self.assertEqual(
+                    app.table_widget.sample_table.cursor_coordinate.row,
+                    app.table_widget.current_row_idx - app.table_widget._viewport_scroll_y,
                 )
 
                 await pilot.press("end")
@@ -245,6 +255,13 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.table_widget.current_sample_idx, 39)
                 self.assertEqual(app.table_widget.sample_table.cursor_coordinate.column, 39)
                 self.assertGreater(app.table_widget.sample_table.scroll_x, 0)
+
+                # Vertical navigation preserves horizontal scroll_x on SampleMatrixTable
+                saved_x = app.table_widget.sample_table.scroll_x
+                await pilot.press("down", "down")
+                await pilot.pause()
+                self.assertGreater(app.table_widget.sample_table.scroll_x, 0)
+                self.assertAlmostEqual(app.table_widget.sample_table.scroll_x, saved_x, delta=2.0)
 
                 await pilot.press("home")
                 await pilot.pause()
