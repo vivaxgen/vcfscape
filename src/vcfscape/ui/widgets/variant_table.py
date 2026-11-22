@@ -291,6 +291,7 @@ class VariantSplitView(Horizontal):
         self._viewport_scroll_y = 0
         self._sample_window_start = 0
         self._sample_window_global_indices: List[int] = []
+        self._last_viewport_rows = 25
         self._last_notified: Optional[Tuple[int, int]] = None
 
         self.window_size = 150
@@ -391,9 +392,14 @@ class VariantSplitView(Horizontal):
             pass
 
     def _adjust_mounted_viewport(self) -> None:
-        if self._split_view_closing:
+        if self._split_view_closing or self._rebuilding:
             return
-        if self._get_active_row_count() > 0:
+        vp_rows = self._get_visible_row_count()
+        active_count = self._get_active_row_count()
+        if active_count > 0 and (
+            vp_rows != self._last_viewport_rows or len(self.records) != min(vp_rows, active_count)
+        ):
+            self._last_viewport_rows = vp_rows
             self._sync_sample_viewport_window(
                 self._viewport_scroll_y,
                 saved_x=getattr(self.sample_table, "scroll_x", 0),
@@ -562,6 +568,13 @@ class VariantSplitView(Horizontal):
         if self._active_global_indices is not None:
             return len(self._active_global_indices)
         return self.fixed_buffer.row_count
+
+    def _get_known_total_count(self) -> Optional[int]:
+        if self._subset_records is not None:
+            return len(self._subset_records)
+        if self._active_global_indices is not None:
+            return len(self._active_global_indices)
+        return self.total_records_count
 
     def _get_record_for_global_idx(self, global_idx: int) -> Optional[VariantRecord]:
         if self._subset_records is not None:
@@ -1242,6 +1255,13 @@ class VariantSplitView(Horizontal):
         if self.total_records_count is not None and current_loaded >= self.total_records_count:
             return False
 
+        if hasattr(self.reader, "get_site_slice"):
+            if hasattr(self.reader, "_wait_for_site_index"):
+                self.reader._wait_for_site_index(current_loaded + batch_size)
+                if self.sync_fixed_buffer_from_reader() > 0:
+                    return True
+            return False
+
         self._is_fetching_more = True
         try:
             try:
@@ -1549,7 +1569,9 @@ class VariantSplitView(Horizontal):
     def on_resize(self, event: events.Resize) -> None:
         if self._split_view_closing or self._rebuilding:
             return
-        if self._get_active_row_count() > 0:
+        vp_rows = self._get_visible_row_count()
+        if self._get_active_row_count() > 0 and vp_rows != self._last_viewport_rows:
+            self._last_viewport_rows = vp_rows
             self._sync_sample_viewport_window(
                 self._viewport_scroll_y,
                 saved_x=getattr(self.sample_table, "scroll_x", 0),
