@@ -241,7 +241,10 @@ class TestVcfIndexing(unittest.TestCase):
         reader = VcfReader(self.vcf_path, lazy=True)
         try:
             self.assertEqual(reader.total_variants, 2500)
+            if reader._site_thread is not None and reader._site_thread.is_alive():
+                reader._site_thread.join(timeout=5.0)
             with reader._site_lock:
+                self.assertEqual(len(reader._site_records), 2500)
                 self.assertIsInstance(reader._site_records[200], _MinimalSite)
         finally:
             reader.close()
@@ -274,6 +277,28 @@ class TestVcfIndexing(unittest.TestCase):
                 self.assertFalse(reader._sample_thread.is_alive())
             if reader._site_thread is not None:
                 self.assertFalse(reader._site_thread.is_alive())
+        finally:
+            if os.path.exists(gz_path):
+                os.remove(gz_path)
+
+    def test_close_nonblocking_returns_immediately(self):
+        """VcfReader.close(wait=False) signals stop immediately without blocking the UI thread."""
+        import gzip
+
+        gz_path = self.vcf_path + ".nonblock.gz"
+        with open(self.vcf_path, "rt", encoding="utf-8") as src, gzip.open(gz_path, "wt", encoding="utf-8") as dst:
+            dst.write(src.read())
+
+        try:
+            reader = VcfReader(gz_path, lazy=True)
+            reader.request_sample_hydration(0, 150)
+            t0 = time.monotonic()
+            reader.close(wait=False)
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 0.05)
+            self.assertTrue(reader._stop_workers)
+            self.assertTrue(reader._stop_event.is_set())
+            reader.close(wait=True, timeout=1.0)
         finally:
             if os.path.exists(gz_path):
                 os.remove(gz_path)

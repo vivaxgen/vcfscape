@@ -189,6 +189,9 @@ def _apply_arrow_backend_to_table(
     """Swap buffered ArrowBackend safely on a FastDataTable without corrupting internal layout state."""
     if new_backend is None:
         return
+    sv = getattr(table, "split_view", None)
+    if getattr(sv, "_closing", False):
+        return
 
     if column_labels is None:
         pa_tbl = getattr(new_backend, "pa_table", None) or getattr(new_backend, "source", None)
@@ -395,6 +398,7 @@ class VariantSplitView(Horizontal):
         self.samples = list(samples)
         self._is_internal_update = False
         self._accept_next_highlight = False
+        self._closing = False
         self._click_timer: Optional[Any] = None
         self.current_row_idx = 0
         self.current_sample_idx = 0
@@ -597,6 +601,8 @@ class VariantSplitView(Horizontal):
         event.stop()
 
     def _arm_click_sync(self) -> None:
+        if self._closing:
+            return
         self._accept_next_highlight = True
         if self._click_timer is not None:
             try:
@@ -610,6 +616,7 @@ class VariantSplitView(Horizontal):
             pass
 
     def stop_timers(self) -> None:
+        self._closing = True
         self._accept_next_highlight = False
         if self._click_timer is not None:
             try:
@@ -689,11 +696,12 @@ class VariantSplitView(Horizontal):
 
     def _run_batched(self, fn: Callable[[], None]) -> None:
         batch_ctx = None
-        if hasattr(self, "app") and hasattr(self.app, "batch_update"):
-            try:
-                batch_ctx = self.app.batch_update()
-            except Exception:
-                batch_ctx = None
+        try:
+            app_obj = self.app
+            if app_obj is not None and hasattr(app_obj, "batch_update"):
+                batch_ctx = app_obj.batch_update()
+        except Exception:
+            batch_ctx = None
         if batch_ctx is not None:
             with batch_ctx:
                 fn()
@@ -972,8 +980,13 @@ class VariantSplitView(Horizontal):
 
     def hydrate_rows(self, row_indices: List[int]) -> None:
         """Patch hydrated sample rows into SampleArrowBuffer and refresh visible matrix."""
-        if not self.reader or not self._is_main_stream_view:
+        if self._closing or not self.reader or not self._is_main_stream_view:
             return
+        try:
+            if getattr(self.app, "_vcfscape_closing", False):
+                return
+        except Exception:
+            pass
         if not hasattr(self.reader, "get_hydrated_record"):
             return
 
@@ -988,26 +1001,37 @@ class VariantSplitView(Horizontal):
                     if idx == self.current_row_idx:
                         updated_current = True
 
-        if not hydrated_map:
+        if not hydrated_map or self._closing:
             return
 
         if self.sample_buffer.hydrate_rows(list(hydrated_map.keys()), hydrated_map):
             saved_x = getattr(self.sample_table, "scroll_x", 0)
             self._is_internal_update = True
-            try:
+
+            def _apply() -> None:
+                if self._closing:
+                    return
                 self._refresh_sample_backend()
                 safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
                 if self.records:
                     safe_row = min(self.current_row_idx, len(self.records) - 1)
-                    self._move_table_cursor(self.sample_table, row=safe_row, column=safe_col, scroll=False)
-                try:
-                    self.sample_table.scroll_to(x=saved_x, y=self._viewport_scroll_y, animate=False, force=True)
-                except Exception:
-                    pass
+                    cur_coord = getattr(self.sample_table, "cursor_coordinate", None)
+                    if cur_coord is None or cur_coord.row != safe_row or cur_coord.column != safe_col:
+                        self._move_table_cursor(self.sample_table, row=safe_row, column=safe_col, scroll=False)
+                cur_x = getattr(self.sample_table, "scroll_x", 0)
+                cur_y = getattr(self.sample_table, "scroll_y", 0)
+                if cur_x != saved_x or cur_y != self._viewport_scroll_y:
+                    try:
+                        self.sample_table.scroll_to(x=saved_x, y=self._viewport_scroll_y, animate=False, force=True)
+                    except Exception:
+                        pass
+
+            try:
+                self._run_batched(_apply)
             finally:
                 self._is_internal_update = False
 
-        if updated_current and 0 <= self.current_row_idx < len(self.records):
+        if updated_current and not self._closing and 0 <= self.current_row_idx < len(self.records):
             self._last_notified = None
             self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
@@ -1127,6 +1151,8 @@ class VariantSplitView(Horizontal):
             self.set_active_row(target_row, sync_fixed=True, sync_sample=False)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int) -> None:
+        if self._closing:
+            return
         if 0 <= row_idx < len(self.records):
             coord = (row_idx, sample_col_idx)
             if self._last_notified == coord:

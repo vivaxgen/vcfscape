@@ -131,7 +131,10 @@ def main(vcf_file, demo, cohorts, web, port, no_browser, token, no_token):
         app.run()
     finally:
         if hasattr(app, "reader") and hasattr(app.reader, "close"):
-            app.reader.close()
+            try:
+                app.reader.close(wait=True, timeout=0.2)
+            except TypeError:
+                app.reader.close()
 
 
 if __name__ == "__main__":

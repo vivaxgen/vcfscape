@@ -843,14 +843,14 @@ class VcfReader:
                                     last_emit_t = now
                                     self._emit_progress(idx)
                                 time.sleep(0.0002)
-                if batch and not self._stop_event.is_set():
+                if batch and not self._stop_event.is_set() and not self._stop_workers:
                     with self._site_lock:
                         self._site_records.extend(batch)
                 with self._site_lock:
                     self._site_stream_done = True
-                    if not self._stop_event.is_set():
+                    if not self._stop_event.is_set() and not self._stop_workers:
                         self._total_variants_count = len(self._site_records)
-                if not self._stop_event.is_set():
+                if not self._stop_event.is_set() and not self._stop_workers:
                     self._emit_progress(self._total_variants_count)
                     self._emit_count_complete(self._total_variants_count)
             except Exception:
@@ -862,7 +862,7 @@ class VcfReader:
 
     def _hydrate_window_sync(self, start_idx: int, count: int) -> List[int]:
         """Hydrate sample payloads for [start_idx, start_idx + count) using Tabix / SparseIndex / scan."""
-        if not self.samples or count <= 0 or self._stop_event.is_set():
+        if not self.samples or count <= 0 or self._stop_event.is_set() or self._stop_workers:
             return []
 
         with self._site_lock:
@@ -1087,12 +1087,15 @@ class VcfReader:
             return self._total_variants_count
         if self._records:
             return len(self._records)
+        if self._stop_event.is_set() or self._stop_workers:
+            with self._site_lock:
+                return len(self._site_records)
         if self._site_thread and self._site_thread.is_alive():
             self._site_thread.join()
         if self._total_variants_count is not None:
             return self._total_variants_count
         if self._sparse_index:
-            if not self._sparse_index.is_ready:
+            if not self._sparse_index.is_ready and not (self._stop_event.is_set() or self._stop_workers):
                 self._sparse_index.wait_until_ready()
             self._total_variants_count = self._sparse_index.total_records
             return self._total_variants_count
@@ -1389,7 +1392,7 @@ class VcfReader:
                     results.append(rec)
         return results
 
-    def close(self) -> None:
+    def close(self, wait: bool = True, timeout: float = 0.2) -> None:
         self._stop_workers = True
         self._stop_event.set()
         self._progress_callbacks.clear()
@@ -1400,6 +1403,8 @@ class VcfReader:
         with self._sample_cond:
             self._priority_window = None
             self._sample_cond.notify_all()
+        if not wait:
+            return
         cur = threading.current_thread()
         for t in (
             self._sample_thread,
@@ -1408,6 +1413,6 @@ class VcfReader:
         ):
             if t is not None and t is not cur and t.is_alive():
                 try:
-                    t.join(timeout=0.15)
+                    t.join(timeout=timeout)
                 except Exception:
                     pass

@@ -23,12 +23,16 @@ class AnimatedSpinner(Static):
         super().__init__(**kwargs)
         self._frame_idx = 0
         self._timer = None
+        self._stopped = False
 
     def on_mount(self) -> None:
+        if self._stopped:
+            return
         self.update_spinner()
         self._timer = self.set_interval(0.08, self.update_spinner)
 
     def on_unmount(self) -> None:
+        self._stopped = True
         if self._timer is not None:
             try:
                 self._timer.stop()
@@ -37,6 +41,8 @@ class AnimatedSpinner(Static):
             self._timer = None
 
     def update_spinner(self) -> None:
+        if self._stopped:
+            return
         frame = SPINNER_FRAMES[self._frame_idx % len(SPINNER_FRAMES)]
         self._frame_idx += 1
         self.update(Text(f" {frame} ", style="bold cyan"))
@@ -144,6 +150,7 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
     def _stop_spinner(self) -> None:
         try:
             spinner = self.query_one("#loading_spinner", AnimatedSpinner)
+            spinner._stopped = True
             if spinner._timer is not None:
                 spinner._timer.stop()
                 spinner._timer = None
@@ -163,6 +170,8 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
             app_obj = None
 
         if app_obj is not None:
+            if getattr(app_obj, "_vcfscape_closing", False):
+                return
             stack = getattr(app_obj, "screen_stack", None)
             if stack is not None:
                 if len(stack) <= 1:
@@ -171,6 +180,7 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
                     return
 
         self._dismiss_requested = True
+        self._stop_spinner()
         try:
             self.dismiss(result)
         except Exception:
@@ -203,6 +213,7 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
         self._safe_dismiss(self._current_count)
 
     def action_quit_app(self) -> None:
+        self._dismiss_requested = True
         self._stop_spinner()
         try:
             app_obj = self.app
@@ -216,7 +227,12 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
                 reader = getattr(app_obj, "reader", None)
                 if reader is not None and hasattr(reader, "close"):
                     try:
-                        reader.close()
+                        reader.close(wait=False)
+                    except TypeError:
+                        try:
+                            reader.close()
+                        except Exception:
+                            pass
                     except Exception:
                         pass
             if hasattr(app_obj, "exit"):

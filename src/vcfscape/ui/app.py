@@ -2,6 +2,7 @@
 Main Textual Application for VCFscape - VCF inspector part of vivaxGEN Project.
 """
 
+import asyncio
 import os
 import signal
 import threading
@@ -50,6 +51,8 @@ class MainScreen(Screen):
 
     def on_screen_resume(self) -> None:
         """Restore focus and layout whenever a modal screen dismisses back to MainScreen."""
+        if getattr(self._app_ref, "_vcfscape_closing", False):
+            return
         try:
             self._app_ref.table_widget.focus()
         except Exception:
@@ -102,6 +105,7 @@ class VcfscapeApp(App):
         self._callbacks_hooked = False
         self._pending_hydrated_indices: Set[int] = set()
         self._hydration_timer: Optional[object] = None
+        self._ui_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Widgets
         provisional_variants = self.reader.get_total_variants_async()
@@ -145,6 +149,10 @@ class VcfscapeApp(App):
 
     def _on_main_screen_mounted(self) -> None:
         """Called after MainScreen and all child widgets have mounted."""
+        try:
+            self._ui_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._ui_loop = None
         self._hook_reader_callbacks()
         try:
             self.table_widget.focus()
@@ -166,7 +174,9 @@ class VcfscapeApp(App):
 
         if not self.reader.total_variants_ready:
             def _push_loading_modal() -> None:
-                if self._vcfscape_closing or self.reader.total_variants_ready:
+                if self._vcfscape_closing:
+                    return
+                if self.reader.total_variants_ready:
                     total = self.reader.get_total_variants_async()
                     if total is not None:
                         self._apply_total_variants(total)
@@ -174,6 +184,8 @@ class VcfscapeApp(App):
 
                 def _on_loading_dismiss(_result=None):
                     self.loading_screen = None
+                    if self._vcfscape_closing:
+                        return
                     try:
                         self.table_widget.focus()
                     except Exception:
@@ -215,14 +227,30 @@ class VcfscapeApp(App):
                 self.table_widget.stop_timers()
             except Exception:
                 pass
-        if self.loading_screen is not None and hasattr(self.loading_screen, "_stop_spinner"):
-            try:
-                self.loading_screen._stop_spinner()
-            except Exception:
-                pass
+        if self.loading_screen is not None:
+            modal = self.loading_screen
+            self.loading_screen = None
+            if hasattr(modal, "_dismiss_requested"):
+                modal._dismiss_requested = True
+            if hasattr(modal, "_stop_spinner"):
+                try:
+                    modal._stop_spinner()
+                except Exception:
+                    pass
         if hasattr(self.reader, "close"):
             try:
-                self.reader.close()
+                self.reader.close(wait=False)
+            except TypeError:
+                try:
+                    self.reader.close()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        workers = getattr(self, "workers", None)
+        if workers is not None and hasattr(workers, "cancel_all"):
+            try:
+                workers.cancel_all()
             except Exception:
                 pass
 
@@ -263,11 +291,28 @@ class VcfscapeApp(App):
             or not getattr(self, "is_running", False)
         ):
             return
+
+        def _guarded_call() -> None:
+            if (
+                self._vcfscape_closing
+                or getattr(self.reader, "_stop_workers", False)
+                or not getattr(self, "is_running", False)
+            ):
+                return
+            try:
+                fn(*args)
+            except Exception:
+                pass
+
         try:
             if threading.get_ident() == getattr(self, "_thread_id", None):
-                fn(*args)
+                _guarded_call()
             else:
-                self.call_from_thread(fn, *args)
+                loop = self._ui_loop or getattr(self, "_loop", None)
+                if loop is not None and loop.is_running() and not loop.is_closed():
+                    loop.call_soon_threadsafe(_guarded_call)
+                else:
+                    self.call_from_thread(_guarded_call)
         except Exception:
             pass
 
@@ -322,6 +367,8 @@ class VcfscapeApp(App):
 
     def on_variant_split_view_variant_selected(self, message: VariantSplitView.VariantSelected):
         """Update sidebar and split-pane when user moves cursor."""
+        if self._vcfscape_closing:
+            return
         rec = message.record
         sample_id = message.sample_id
         
