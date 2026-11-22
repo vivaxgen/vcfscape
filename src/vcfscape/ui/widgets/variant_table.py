@@ -1,32 +1,32 @@
 """
-Central Variant Split Table for VCFscape powered by textual-fastdatatable.
-Provides a true vertical split between:
-1. FixedVariantTable (passive FastDataTable backed by FixedArrowBuffer)
+Central Variant Split Table for VCFscape backed by Dual PyArrow ArrowBackends:
+1. FixedVariantTable (passive virtualized ScrollView backed by FixedArrowBuffer)
 2. Vertical divider (1ch │)
-3. SampleMatrixTable (passive FastDataTable backed by SampleArrowBuffer across all samples)
+3. SampleMatrixTable (passive virtualized ScrollView backed by fixed-viewport SampleArrowBuffer)
 With VariantSplitView as the top-level focused widget capturing Up/Down/PageUp/PageDown/
 Left/Right/Home/End keys and mouse wheel events to command both child tables in lockstep.
 """
 
 from __future__ import annotations
 
-import dataclasses
-from functools import cached_property
-import inspect
+from bisect import bisect_right
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from textual import events, on
+from textual import events
 from textual.coordinate import Coordinate
-from textual.widget import Widget
+from textual.geometry import Size
+from textual.message import Message
+from textual.reactive import reactive
+from textual.strip import Strip
 from textual.widgets import Static
 from textual.containers import Horizontal
-from textual.reactive import reactive
-from textual.message import Message
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 
 try:
-    from textual_fastdatatable import DataTable as FastDataTable
+    from textual.scroll_view import ScrollView
 except ImportError:
-    from textual_fastdatatable import FastDataTable  # type: ignore
+    from textual.widgets import ScrollView  # type: ignore
 
 try:
     from textual_fastdatatable import ArrowBackend
@@ -34,7 +34,10 @@ except ImportError:
     try:
         from textual_fastdatatable.backends.arrow import ArrowBackend
     except ImportError:
-        from textual_fastdatatable.backend import ArrowBackend  # type: ignore
+        try:
+            from textual_fastdatatable.backend import ArrowBackend  # type: ignore
+        except ImportError:
+            ArrowBackend = object  # type: ignore
 
 from vcfscape.core.vcf_reader import VariantRecord
 from vcfscape.core.arrow_buffer import (
@@ -45,12 +48,26 @@ from vcfscape.core.arrow_buffer import (
 )
 
 
-class StyledArrowBackend(ArrowBackend):
+FIXED_COLUMN_WIDTHS: Dict[str, int] = {
+    "CHROM": 11,
+    "POS": 9,
+    "ID": 11,
+    "REF": 4,
+    "ALT": 5,
+    "QUAL": 5,
+    "FILTER": 6,
+    "GENE": 10,
+    "INFO": 16,
+    "FORMAT": 9,
+}
+
+
+class StyledArrowBackend(ArrowBackend):  # type: ignore[misc]
     """
     ArrowBackend extension supporting:
     - Lazy viewport-only Rich Text styling on visible cells/rows.
-    - Optional live row/cell providers so background sample hydration updates cells
-      in place without calling set_backend() or disturbing cursor/scroll state.
+    - Live row/cell providers so background sample hydration and Handle 1 site streaming
+      update cells in place without replacing table.backend or disturbing scroll state.
     """
 
     def __init__(
@@ -61,7 +78,8 @@ class StyledArrowBackend(ArrowBackend):
         live_row_provider: Optional[Callable[[int], List[Any]]] = None,
         live_cell_provider: Optional[Callable[[int, int], Any]] = None,
     ):
-        super().__init__(table)
+        if ArrowBackend is not object:
+            super().__init__(table)
         self.pa_table = table
         self._row_styler = row_styler
         self._cell_styler = cell_styler
@@ -87,14 +105,19 @@ class StyledArrowBackend(ArrowBackend):
         if self._cell_styler is not None:
             return self._cell_styler(row, column, val)
         if self._row_styler is not None:
-            styled = self._row_styler(row, self.get_row_at(row) if self._live_row_provider else list(super().get_row_at(row)))
+            raw_row = (
+                self._live_row_provider(row)
+                if self._live_row_provider is not None
+                else list(super().get_row_at(row))
+            )
+            styled = self._row_styler(row, raw_row)
             if 0 <= column < len(styled):
                 return styled[column]
         return val
 
 
-def _clear_table_render_caches(table: FastDataTable) -> None:
-    """Clear lightweight render/line caches on a FastDataTable before repainting."""
+def _clear_table_render_caches(table: Any) -> None:
+    """Invalidate cached line strips if present before repainting."""
     for cache_attr in (
         "_row_cache",
         "_line_cache",
@@ -111,55 +134,435 @@ def _clear_table_render_caches(table: FastDataTable) -> None:
                 pass
 
 
-def _apply_arrow_backend_to_table(
-    table: FastDataTable,
-    new_backend: Any,
-    column_labels: Optional[List[str]] = None,
-) -> None:
-    """Bind an ArrowBackend when schema or row count changes (never used during hydration)."""
-    if new_backend is None:
-        return
-    sv = getattr(table, "split_view", None)
-    if getattr(sv, "_split_view_closing", False):
-        return
+def _truncate_text_to_width(val: Any, width: int) -> Tuple[str, Optional[Style]]:
+    """Convert cell value (str or Rich Text) into a padded/truncated string + base style."""
+    if isinstance(val, Text):
+        raw = val.plain
+        base_style: Optional[Style] = val.style if isinstance(val.style, Style) else None
+        if base_style is None and val.style:
+            try:
+                base_style = Style.parse(str(val.style))
+            except Exception:
+                base_style = None
+        if base_style is None and val._spans:
+            sp_style = val._spans[0].style
+            if isinstance(sp_style, Style):
+                base_style = sp_style
+            elif sp_style:
+                try:
+                    base_style = Style.parse(str(sp_style))
+                except Exception:
+                    base_style = None
+    else:
+        raw = "." if val is None else str(val)
+        base_style = None
 
-    if hasattr(table, "set_backend"):
-        table.set_backend(new_backend)
-        return
-
-    if column_labels is None:
-        pa_tbl = getattr(new_backend, "pa_table", None) or getattr(new_backend, "source", None)
-        if pa_tbl is not None and hasattr(pa_tbl, "column_names"):
-            column_labels = list(pa_tbl.column_names)
-
-    table.backend = new_backend
-    if column_labels is not None and getattr(table, "_column_labels", None) is not None:
-        table._column_labels = list(column_labels)
-
-    for cls in type(table).__mro__:
-        for prop_name, prop_obj in cls.__dict__.items():
-            if isinstance(prop_obj, cached_property):
-                table.__dict__.pop(prop_name, None)
-
-    _clear_table_render_caches(table)
-    try:
-        table.refresh(layout=True)
-    except Exception:
-        pass
+    if len(raw) > width:
+        if width >= 2:
+            raw = raw[: width - 1] + "…"
+        else:
+            raw = raw[:width]
+    if len(raw) < width:
+        raw = raw.ljust(width)
+    return raw, base_style
 
 
-class _PassiveSplitTable(FastDataTable):
-    """Base passive FastDataTable delegating vertical wheel & keys to parent VariantSplitView."""
+class _PassiveSplitTable(ScrollView):
+    """
+    Virtualized passive ScrollView grid reading directly from StyledArrowBackend:
+    - Sticky 1-line header at y == 0
+    - O(visible_rows * visible_cols) render_line(y) with bisect column clipping
+    - Deterministic cursor_coordinate and horizontal scroll_to(x=...) without opaque caches
+    """
 
     can_focus = False
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.peer_table: Optional[FastDataTable] = None
-        self.split_view: Optional["VariantSplitView"] = None
+    DEFAULT_CSS = """
+    _PassiveSplitTable {
+        overflow-x: auto;
+        overflow-y: auto;
+    }
+    """
 
-    def apply_arrow_backend(self, new_backend: Any, column_labels: Optional[List[str]] = None) -> None:
-        _apply_arrow_backend_to_table(self, new_backend, column_labels=column_labels)
+    def __init__(
+        self,
+        backend: Any = None,
+        column_labels: Optional[List[str]] = None,
+        cursor_type: str = "cell",
+        zebra_stripes: bool = True,
+        show_row_labels: bool = False,
+        show_cursor: bool = True,
+        null_rep: str = ".",
+        live_row_count_provider: Optional[Callable[[], int]] = None,
+        is_fixed_pane: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.peer_table: Optional["_PassiveSplitTable"] = None
+        self.split_view: Optional["VariantSplitView"] = None
+        self.backend = backend
+        self.cursor_type = cursor_type
+        self.zebra_stripes = zebra_stripes
+        self.show_row_labels = show_row_labels
+        self.show_cursor = show_cursor
+        self.null_rep = null_rep
+        self.header_height = 1
+        self.show_header = True
+        self._is_fixed_pane = is_fixed_pane
+        self._live_row_count_provider = live_row_count_provider
+        self._cursor_coord = Coordinate(0, 0)
+
+        if column_labels is not None:
+            self._column_labels = list(column_labels)
+        else:
+            pa_tbl = getattr(backend, "pa_table", None)
+            if pa_tbl is not None and hasattr(pa_tbl, "column_names"):
+                self._column_labels = list(pa_tbl.column_names)
+            else:
+                self._column_labels = []
+
+        self._col_widths: List[int] = []
+        self._col_offsets: List[int] = []
+        self._total_width: int = 1
+        self._recompute_column_geometry()
+        self.sync_dimensions()
+
+    @property
+    def row_count(self) -> int:
+        if self._live_row_count_provider is not None:
+            try:
+                return max(0, int(self._live_row_count_provider()))
+            except Exception:
+                pass
+        if self.backend is not None:
+            pa_tbl = getattr(self.backend, "pa_table", None)
+            if pa_tbl is not None and hasattr(pa_tbl, "num_rows"):
+                return int(pa_tbl.num_rows)
+            rc = getattr(self.backend, "row_count", 0)
+            return int(rc)
+        return 0
+
+    @property
+    def column_count(self) -> int:
+        if self._column_labels:
+            return len(self._column_labels)
+        if self.backend is not None:
+            pa_tbl = getattr(self.backend, "pa_table", None)
+            if pa_tbl is not None and hasattr(pa_tbl, "num_columns"):
+                return int(pa_tbl.num_columns)
+            return int(getattr(self.backend, "column_count", 0))
+        return 0
+
+    @property
+    def cursor_coordinate(self) -> Coordinate:
+        return self._cursor_coord
+
+    @cursor_coordinate.setter
+    def cursor_coordinate(self, coord: Coordinate) -> None:
+        max_r = max(0, self.row_count - 1)
+        max_c = max(0, self.column_count - 1)
+        clamped = Coordinate(
+            max(0, min(max_r, int(coord.row))),
+            max(0, min(max_c, int(coord.column))),
+        )
+        if clamped != self._cursor_coord:
+            self._cursor_coord = clamped
+            try:
+                self.refresh()
+            except Exception:
+                pass
+
+    def _recompute_column_geometry(self) -> None:
+        widths: List[int] = []
+        offsets: List[int] = []
+        x_pos = 0
+        for label in self._column_labels:
+            if self._is_fixed_pane:
+                w = FIXED_COLUMN_WIDTHS.get(label, max(6, len(label) + 1))
+            else:
+                w = max(8, min(16, len(label) + 2))
+            offsets.append(x_pos)
+            widths.append(w)
+            x_pos += w + 1  # 1ch separator gap between columns
+        self._col_widths = widths
+        self._col_offsets = offsets
+        self._total_width = max(1, x_pos - 1 if widths else 1)
+
+    def sync_dimensions(self) -> None:
+        hdr_h = self.header_height if self.show_header else 0
+        extra_pad = 1 if self._is_fixed_pane else 0
+        total_h = max(1, self.row_count + hdr_h + extra_pad)
+        total_w = max(1, self._total_width)
+        self.virtual_size = Size(total_w, total_h)
+        max_r = max(0, self.row_count - 1)
+        max_c = max(0, self.column_count - 1)
+        if self._cursor_coord.row > max_r or self._cursor_coord.column > max_c:
+            self._cursor_coord = Coordinate(
+                min(self._cursor_coord.row, max_r),
+                min(self._cursor_coord.column, max_c),
+            )
+
+    def apply_arrow_backend(
+        self,
+        new_backend: Any,
+        column_labels: Optional[List[str]] = None,
+    ) -> None:
+        sv = self.split_view
+        if getattr(sv, "_split_view_closing", False):
+            return
+        if new_backend is None:
+            return
+        self.backend = new_backend
+        if column_labels is not None:
+            self._column_labels = list(column_labels)
+        else:
+            pa_tbl = getattr(new_backend, "pa_table", None)
+            if pa_tbl is not None and hasattr(pa_tbl, "column_names"):
+                self._column_labels = list(pa_tbl.column_names)
+        self._recompute_column_geometry()
+        self.sync_dimensions()
+        try:
+            self.refresh(layout=True)
+        except Exception:
+            try:
+                self.refresh()
+            except Exception:
+                pass
+
+    def _viewport_width(self) -> int:
+        try:
+            scr = self.scrollable_content_region
+            if scr is not None and scr.width > 0:
+                return scr.width
+        except Exception:
+            pass
+        try:
+            if self.size.width > 0:
+                return self.size.width
+        except Exception:
+            pass
+        return 40
+
+    def _viewport_height(self) -> int:
+        try:
+            scr = self.scrollable_content_region
+            if scr is not None and scr.height > 0:
+                return scr.height
+        except Exception:
+            pass
+        try:
+            if self.size.height > 0:
+                return self.size.height
+        except Exception:
+            pass
+        return 26
+
+    def get_current_scroll_x(self) -> float:
+        sx = getattr(self, "scroll_x", 0.0) or 0.0
+        stx = getattr(self, "scroll_target_x", sx)
+        return float(stx if stx is not None else sx)
+
+    def get_effective_max_scroll_x(self) -> int:
+        try:
+            msx = int(self.max_scroll_x)
+            if msx > 0:
+                return msx
+        except Exception:
+            pass
+        return max(0, self._total_width - self._viewport_width())
+
+    def scroll_to_safe(
+        self,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+    ) -> None:
+        try:
+            self.scroll_to(x=x, y=y, animate=False, force=True, immediate=True)
+        except TypeError:
+            try:
+                self.scroll_to(x=x, y=y, animate=False, force=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def scroll_cursor_into_view(
+        self,
+        horizontal: bool = True,
+        vertical: bool = False,
+    ) -> None:
+        target_x: Optional[float] = None
+        target_y: Optional[float] = None
+
+        if horizontal and self._col_offsets:
+            col = max(0, min(len(self._col_offsets) - 1, self._cursor_coord.column))
+            col_x0 = self._col_offsets[col]
+            col_x1 = col_x0 + self._col_widths[col]
+            vp_w = self._viewport_width()
+            cur_x = int(self.get_current_scroll_x())
+            max_x = self.get_effective_max_scroll_x()
+            if col_x1 > cur_x + vp_w:
+                target_x = max(0, min(max_x, col_x1 - vp_w))
+            elif col_x0 < cur_x:
+                target_x = max(0, min(max_x, col_x0))
+
+        if vertical and not self._is_fixed_pane:
+            target_y = 0
+        elif vertical and self._is_fixed_pane:
+            hdr = self.header_height if self.show_header else 0
+            vis_rows = max(1, self._viewport_height() - hdr)
+            cur_y = int(getattr(self, "scroll_y", 0) or 0)
+            row = self._cursor_coord.row
+            if row < cur_y:
+                target_y = row
+            elif row >= cur_y + vis_rows:
+                target_y = row - vis_rows + 1
+
+        if target_x is not None or target_y is not None:
+            self.scroll_to_safe(x=target_x, y=target_y)
+
+    def move_cursor(
+        self,
+        *,
+        row: Optional[int] = None,
+        column: Optional[int] = None,
+        animate: bool = False,
+        scroll: bool = True,
+    ) -> None:
+        max_r = max(0, self.row_count - 1)
+        max_c = max(0, self.column_count - 1)
+        target_r = self._cursor_coord.row if row is None else max(0, min(max_r, int(row)))
+        target_c = self._cursor_coord.column if column is None else max(0, min(max_c, int(column)))
+        self._cursor_coord = Coordinate(target_r, target_c)
+        if scroll:
+            self.scroll_cursor_into_view(
+                horizontal=(column is not None),
+                vertical=self._is_fixed_pane,
+            )
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def _is_light_theme(self) -> bool:
+        try:
+            app_obj = self.app
+            if app_obj is not None and "theme-light" in getattr(app_obj, "classes", ()):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def render_line(self, y: int) -> Strip:
+        vp_w = self._viewport_width()
+        if vp_w <= 0:
+            return Strip.blank(0)
+        is_light = self._is_light_theme()
+
+        if is_light:
+            bg_hex = "#ffffff"
+            zebra_hex = "#f1f5f9"
+            hdr_bg_hex = "#e2e8f0"
+            hdr_fg_hex = "#0f172a"
+            cursor_bg_hex = "#2563eb"
+            cursor_fg_hex = "#ffffff"
+            default_fg_hex = "#0f172a"
+            sep_fg_hex = "#cbd5e1"
+        else:
+            bg_hex = "#0b0f17"
+            zebra_hex = "#111827"
+            hdr_bg_hex = "#161e2e"
+            hdr_fg_hex = "#38bdf8" if self._is_fixed_pane else "#f8fafc"
+            cursor_bg_hex = "#1d4ed8"
+            cursor_fg_hex = "#f8fafc"
+            default_fg_hex = "#e2e8f0"
+            sep_fg_hex = "#1e293b"
+
+        bg_style = Style(bgcolor=bg_hex, color=default_fg_hex)
+        if not self._column_labels or not self._col_offsets:
+            return Strip.blank(vp_w, bg_style)
+
+        scroll_x = max(0, int(getattr(self, "scroll_x", 0) or 0))
+        scroll_y = 0 if not self._is_fixed_pane else max(0, int(getattr(self, "scroll_y", 0) or 0))
+
+        first_col = max(0, bisect_right(self._col_offsets, scroll_x) - 1)
+        start_x = self._col_offsets[first_col]
+        end_x = scroll_x + vp_w
+
+        if self.show_header and y == 0:
+            hdr_style = Style(bgcolor=hdr_bg_hex, color=hdr_fg_hex, bold=True)
+            hdr_sep_style = Style(bgcolor=hdr_bg_hex, color=sep_fg_hex)
+            segments: List[Segment] = []
+            num_cols = len(self._column_labels)
+            for col_idx in range(first_col, num_cols):
+                col_x = self._col_offsets[col_idx]
+                if col_x >= end_x:
+                    break
+                col_w = self._col_widths[col_idx]
+                cell_txt, _ = _truncate_text_to_width(self._column_labels[col_idx], col_w)
+                segments.append(Segment(cell_txt, hdr_style))
+                if col_idx < num_cols - 1:
+                    segments.append(Segment(" ", hdr_sep_style))
+            strip = Strip(segments)
+            crop_start = max(0, scroll_x - start_x)
+            if crop_start >= strip.cell_length:
+                return Strip.blank(vp_w, hdr_style)
+            return strip.crop(crop_start, crop_start + vp_w).adjust_cell_length(vp_w, hdr_style)
+
+        data_row = (y - (self.header_height if self.show_header else 0)) + scroll_y
+        if data_row < 0 or data_row >= self.row_count:
+            return Strip.blank(vp_w, bg_style)
+
+        is_zebra = self.zebra_stripes and (data_row % 2 == 1)
+        row_bg = zebra_hex if is_zebra else bg_hex
+        row_base_style = Style(bgcolor=row_bg, color=default_fg_hex)
+        sep_style = Style(bgcolor=row_bg, color=sep_fg_hex)
+        cursor_style = Style(bgcolor=cursor_bg_hex, color=cursor_fg_hex, bold=True)
+
+        is_active_row = self.show_cursor and (data_row == self._cursor_coord.row)
+        row_highlight = is_active_row and self.cursor_type == "row"
+
+        segments = []
+        num_cols = len(self._column_labels)
+        backend = self.backend
+        for col_idx in range(first_col, num_cols):
+            col_x = self._col_offsets[col_idx]
+            if col_x >= end_x:
+                break
+            col_w = self._col_widths[col_idx]
+            if backend is not None and hasattr(backend, "get_cell_at"):
+                try:
+                    raw_val = backend.get_cell_at(data_row, col_idx)
+                except Exception:
+                    raw_val = self.null_rep
+            else:
+                raw_val = self.null_rep
+
+            cell_txt, cell_fg_style = _truncate_text_to_width(raw_val, col_w)
+            cell_highlight = row_highlight or (
+                is_active_row and self.cursor_type == "cell" and col_idx == self._cursor_coord.column
+            )
+            if cell_highlight:
+                st = cursor_style
+            elif cell_fg_style is not None:
+                st = Style(
+                    color=cell_fg_style.color,
+                    bgcolor=row_bg,
+                    bold=cell_fg_style.bold,
+                    dim=cell_fg_style.dim,
+                )
+            else:
+                st = row_base_style
+            segments.append(Segment(cell_txt, st))
+            if col_idx < num_cols - 1:
+                segments.append(Segment(" ", cursor_style if row_highlight else sep_style))
+
+        strip = Strip(segments)
+        crop_start = max(0, scroll_x - start_x)
+        fill_style = cursor_style if row_highlight else row_base_style
+        if crop_start >= strip.cell_length:
+            return Strip.blank(vp_w, fill_style)
+        return strip.crop(crop_start, crop_start + vp_w).adjust_cell_length(vp_w, fill_style)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         event.stop()
@@ -171,8 +574,24 @@ class _PassiveSplitTable(FastDataTable):
         event.stop()
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        if self.split_view is not None:
-            self.split_view._arm_click_sync()
+        sv = self.split_view
+        if sv is None:
+            return
+        vp_w = self._viewport_width()
+        vp_h = self._viewport_height()
+        if event.x < 0 or event.x >= vp_w or event.y < 0 or event.y >= vp_h:
+            return
+        hdr = self.header_height if self.show_header else 0
+        if event.y < hdr:
+            return
+        scroll_y = 0 if not self._is_fixed_pane else max(0, int(getattr(self, "scroll_y", 0) or 0))
+        data_row = scroll_y + (event.y - hdr)
+        if not (0 <= data_row < self.row_count):
+            return
+
+        content_x = max(0, int(getattr(self, "scroll_x", 0) or 0)) + event.x
+        col_idx = max(0, min(self.column_count - 1, bisect_right(self._col_offsets, content_x) - 1)) if self._col_offsets else 0
+        sv._handle_table_click(self, data_row, col_idx)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
@@ -193,7 +612,14 @@ class _PassiveSplitTable(FastDataTable):
 
 
 class FixedVariantTable(_PassiveSplitTable):
-    """Left anchored passive FastDataTable displaying variant metadata columns."""
+    """Left anchored passive ScrollView table displaying variant metadata columns."""
+
+    DEFAULT_CSS = """
+    FixedVariantTable {
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+    """
 
     def on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
         event.stop()
@@ -205,15 +631,21 @@ class FixedVariantTable(_PassiveSplitTable):
 
 
 class SampleMatrixTable(_PassiveSplitTable):
-    """Right horizontally scrollable passive FastDataTable displaying sample cells."""
-    pass
+    """Right horizontally scrollable passive ScrollView table displaying sample cells."""
+
+    DEFAULT_CSS = """
+    SampleMatrixTable {
+        overflow-x: auto;
+        overflow-y: auto;
+    }
+    """
 
 
 class VariantSplitView(Horizontal):
     """
     Top-level Split Table Controller backed by Dual PyArrow ArrowBackends:
     - Holds focus (`can_focus=True`) and captures Up/Down/PageUp/PageDown/Left/Right/Home/End
-      plus vertical mouse wheel events, commanding both passive FastDataTables in lockstep.
+      plus vertical mouse wheel events, commanding both passive tables in lockstep.
     - Background hydration repaints SampleMatrixTable in place via live StyledArrowBackend
       providers without replacing table.backend or resetting cursor/scroll offsets.
     """
@@ -283,9 +715,7 @@ class VariantSplitView(Horizontal):
         self.reader = reader
         self.samples = list(samples)
         self._is_internal_update = False
-        self._accept_next_highlight = False
         self._split_view_closing = False
-        self._click_timer: Optional[Any] = None
         self.current_row_idx = 0
         self.current_sample_idx = 0
         self._viewport_scroll_y = 0
@@ -334,16 +764,22 @@ class VariantSplitView(Horizontal):
 
         fixed_backend = self._build_fixed_arrow_backend(self.view_mode)
         sample_backend = self._build_sample_arrow_backend(self.format_tag)
+        sample_cols = self.samples if self.samples else ["Samples"]
 
         self.fixed_table = FixedVariantTable(
             id="fixed_table",
             backend=fixed_backend,
+            column_labels=self._get_fixed_columns(),
             cursor_type="row",
             zebra_stripes=True,
             show_row_labels=False,
             show_cursor=True,
             null_rep=".",
+            live_row_count_provider=self._get_active_row_count,
+            is_fixed_pane=True,
         )
+        self.fixed_table.show_vertical_scrollbar = False
+        self.fixed_table.show_horizontal_scrollbar = False
         self.fixed_table.styles.width = self.FIXED_WIDTHS.get(self.view_mode, 56)
 
         self.divider = Static("│", id="table_divider")
@@ -355,11 +791,14 @@ class VariantSplitView(Horizontal):
         self.sample_table = SampleMatrixTable(
             id="sample_table",
             backend=sample_backend,
+            column_labels=sample_cols,
             cursor_type="cell",
             zebra_stripes=True,
             show_row_labels=False,
             show_cursor=True,
             null_rep="...",
+            live_row_count_provider=lambda: len(self.records),
+            is_fixed_pane=False,
         )
         self.sample_table.styles.width = "1fr"
         self.sample_table.styles.height = "100%"
@@ -378,6 +817,8 @@ class VariantSplitView(Horizontal):
     def on_mount(self):
         self._sync_sample_vertical_scrollbar()
         self.sync_fixed_buffer_from_reader()
+        self.fixed_table.sync_dimensions()
+        self.sample_table.sync_dimensions()
         if getattr(self.fixed_table, "backend", None) is None or getattr(self.sample_table, "backend", None) is None:
             self.rebuild_tables()
         else:
@@ -402,12 +843,9 @@ class VariantSplitView(Horizontal):
             self._last_viewport_rows = vp_rows
             self._sync_sample_viewport_window(
                 self._viewport_scroll_y,
-                saved_x=getattr(self.sample_table, "scroll_x", 0),
+                saved_x=self.sample_table.get_current_scroll_x(),
             )
-            try:
-                self.fixed_table.scroll_to(y=self._viewport_scroll_y, animate=False, force=True)
-            except Exception:
-                pass
+            self.fixed_table.scroll_to_safe(y=self._viewport_scroll_y)
 
     def _style_fixed_cell_value(self, row_idx: int, col_idx: int, val: Any) -> Any:
         cols = self._get_fixed_columns()
@@ -649,7 +1087,7 @@ class VariantSplitView(Horizontal):
             pass
 
     def sync_fixed_buffer_from_reader(self, wait_for_stream: bool = False) -> int:
-        """Pull any newly streamed Handle 1 sites into FixedArrowBuffer cleanly."""
+        """Pull newly streamed Handle 1 sites into FixedArrowBuffer without heavy UI rebuilds."""
         if not self.reader or self._subset_records is not None or self._is_fetching_more:
             return 0
         if wait_for_stream and hasattr(self.reader, "_site_thread"):
@@ -672,7 +1110,7 @@ class VariantSplitView(Horizontal):
         self._observed_variant_count = max(self._observed_variant_count, self.fixed_buffer.row_count)
 
         if self._is_main_stream_view and self._active_global_indices is None:
-            saved_x = getattr(self.sample_table, "scroll_x", 0)
+            saved_x = self.sample_table.get_current_scroll_x()
             saved_y = self._viewport_scroll_y
             active_count = self._get_active_row_count()
             safe_row = min(self.current_row_idx, active_count - 1) if active_count else 0
@@ -680,10 +1118,14 @@ class VariantSplitView(Horizontal):
 
             self._is_internal_update = True
             try:
-                self._refresh_fixed_backend()
+                if getattr(self.fixed_table, "backend", None) is None:
+                    self._refresh_fixed_backend()
+                else:
+                    self.fixed_table.sync_dimensions()
+                    self.fixed_table.refresh()
                 if active_count:
                     self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-                self.fixed_table.scroll_to(y=saved_y, animate=False, force=True)
+                self.fixed_table.scroll_to_safe(y=saved_y)
             except Exception:
                 pass
             finally:
@@ -691,8 +1133,6 @@ class VariantSplitView(Horizontal):
 
             if len(self.records) < self._get_visible_row_count():
                 self._sync_sample_viewport_window(saved_y, saved_x=saved_x)
-            else:
-                self._schedule_fixed_post_layout_scroll(target_y=saved_y, cursor_row=safe_row)
 
             self._sync_sample_vertical_scrollbar()
         return len(new_sites)
@@ -714,47 +1154,11 @@ class VariantSplitView(Horizontal):
     def on_mouse_move(self, event: events.MouseMove) -> None:
         event.stop()
 
-    def _arm_click_sync(self) -> None:
-        if self._split_view_closing:
-            return
-        self._accept_next_highlight = True
-        if self._click_timer is not None:
-            try:
-                self._click_timer.stop()
-            except Exception:
-                pass
-            self._click_timer = None
-        try:
-            self._click_timer = self.set_timer(0.3, self._disarm_click_sync)
-        except Exception:
-            pass
-
     def stop_timers(self) -> None:
         self._split_view_closing = True
-        self._accept_next_highlight = False
-        if self._click_timer is not None:
-            try:
-                self._click_timer.stop()
-            except Exception:
-                pass
-            self._click_timer = None
 
     def on_unmount(self) -> None:
         self.stop_timers()
-
-    def _disarm_click_sync(self) -> None:
-        self._accept_next_highlight = False
-        if self._click_timer is not None:
-            try:
-                self._click_timer.stop()
-            except Exception:
-                pass
-            self._click_timer = None
-        if not self._split_view_closing:
-            try:
-                self.focus()
-            except Exception:
-                pass
 
     def _get_visible_row_count(self) -> int:
         heights: List[int] = []
@@ -785,7 +1189,7 @@ class VariantSplitView(Horizontal):
 
     def _move_table_cursor(
         self,
-        table: FastDataTable,
+        table: _PassiveSplitTable,
         row: int,
         column: Optional[int] = None,
         scroll: bool = False,
@@ -797,89 +1201,7 @@ class VariantSplitView(Horizontal):
             else:
                 table.move_cursor(row=row, column=col, animate=False, scroll=scroll)
         except TypeError:
-            try:
-                table.cursor_coordinate = Coordinate(row, col)
-            except Exception:
-                pass
-
-    def _schedule_fixed_post_layout_scroll(self, target_y: int, cursor_row: int) -> None:
-        if self._split_view_closing:
-            return
-        try:
-            app_obj = self.app
-            if app_obj is None or getattr(app_obj, "_vcfscape_closing", False):
-                return
-        except Exception:
-            return
-
-        def _restore() -> None:
-            if self._split_view_closing:
-                return
-            self._is_internal_update = True
-            try:
-                active_count = self._get_active_row_count()
-                if active_count:
-                    safe_row = max(0, min(active_count - 1, cursor_row))
-                    self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-                clamped_y = max(0, min(self._get_max_scroll_y(), target_y))
-                self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
-            except Exception:
-                pass
-            finally:
-                self._is_internal_update = False
-
-        try:
-            self.call_after_refresh(_restore)
-        except Exception:
-            pass
-
-    def _schedule_post_layout_scroll(
-        self,
-        target_y: int,
-        target_x: Optional[float],
-        cursor_row: int,
-        cursor_col: int,
-    ) -> None:
-        """Restore exact scroll/cursor after layout passes without drifting SampleMatrixTable."""
-        if self._split_view_closing:
-            return
-        try:
-            app_obj = self.app
-            if app_obj is None or getattr(app_obj, "_vcfscape_closing", False):
-                return
-        except Exception:
-            return
-
-        def _restore() -> None:
-            if self._split_view_closing:
-                return
-            self._is_internal_update = True
-            try:
-                active_count = self._get_active_row_count()
-                if active_count:
-                    safe_row = max(0, min(active_count - 1, cursor_row))
-                    self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-                clamped_y = max(0, min(self._get_max_scroll_y(), target_y))
-                self._viewport_scroll_y = clamped_y
-                self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
-
-                if self.records:
-                    local_row = self._get_local_sample_cursor_row()
-                    safe_col = max(0, min(len(self.samples) - 1, cursor_col)) if self.samples else 0
-                    self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
-                if target_x is not None:
-                    self.sample_table.scroll_to(x=target_x, y=0, animate=False, force=True)
-                else:
-                    self.sample_table.scroll_to(y=0, animate=False, force=True)
-            except Exception:
-                pass
-            finally:
-                self._is_internal_update = False
-
-        try:
-            self.call_after_refresh(_restore)
-        except Exception:
-            pass
+            table.cursor_coordinate = Coordinate(row, col)
 
     def _sync_sample_viewport_window(
         self,
@@ -890,7 +1212,7 @@ class VariantSplitView(Horizontal):
         """
         Manually fill SampleMatrixTable's fixed viewport buffer for display rows
         [viewport_top, viewport_top + viewport_rows). Keeps sample_table.scroll_y pinned at 0
-        and avoids backend swaps during steady scrolling so horizontal scroll_x stays intact.
+        and never replaces sample_table.backend during steady scrolling or resize.
         """
         active_count = self._get_active_row_count()
         visible_rows = max(1, self._get_visible_row_count())
@@ -918,33 +1240,24 @@ class VariantSplitView(Horizontal):
         self._sample_window_global_indices = window_global_indices
         self.records = window_records
 
-        prev_sample_rows = getattr(self.sample_table, "row_count", -1)
         prev_backend = getattr(self.sample_table, "backend", None)
-        x_to_keep = getattr(self.sample_table, "scroll_x", 0) if saved_x is None else saved_x
+        x_to_keep = self.sample_table.get_current_scroll_x() if saved_x is None else saved_x
         local_row = self._get_local_sample_cursor_row()
         safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
 
         self.sample_buffer.reset(self.records, samples=self.samples)
 
-        def _apply() -> None:
-            if force_rebind or prev_backend is None or prev_sample_rows != len(self.records):
+        self._is_internal_update = True
+        try:
+            if force_rebind or prev_backend is None:
                 self._refresh_sample_backend()
             else:
                 _clear_table_render_caches(self.sample_table)
-                try:
-                    self.sample_table.refresh()
-                except Exception:
-                    pass
+                self.sample_table.sync_dimensions()
             if self.records:
                 self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
-            try:
-                self.sample_table.scroll_to(x=x_to_keep, y=0, animate=False, force=True)
-            except Exception:
-                pass
-
-        self._is_internal_update = True
-        try:
-            self._run_batched(_apply)
+            self.sample_table.scroll_to_safe(x=x_to_keep, y=0)
+            self.sample_table.refresh()
         finally:
             self._is_internal_update = False
 
@@ -963,36 +1276,16 @@ class VariantSplitView(Horizontal):
         """Align FixedVariantTable scroll_y and SampleMatrixTable fixed viewport window to target_y."""
         max_y = self._get_max_scroll_y()
         clamped_y = max(0, min(max_y, int(target_y)))
-        saved_x = getattr(self.sample_table, "scroll_x", 0)
+        saved_x = self.sample_table.get_current_scroll_x()
 
         self._sync_sample_viewport_window(clamped_y, saved_x=saved_x)
 
         self._is_internal_update = True
         try:
-            try:
-                self.fixed_table.scroll_to(y=clamped_y, animate=False, force=True)
-            except Exception:
-                pass
-            try:
-                self.sample_table.scroll_to(x=saved_x, y=0, animate=False, force=True)
-            except Exception:
-                pass
+            self.fixed_table.scroll_to_safe(y=clamped_y)
+            self.sample_table.scroll_to_safe(x=saved_x, y=0)
         finally:
             self._is_internal_update = False
-
-    def _run_batched(self, fn: Callable[[], None]) -> None:
-        batch_ctx = None
-        try:
-            app_obj = self.app
-            if app_obj is not None and hasattr(app_obj, "batch_update"):
-                batch_ctx = app_obj.batch_update()
-        except Exception:
-            batch_ctx = None
-        if batch_ctx is not None:
-            with batch_ctx:
-                fn()
-        else:
-            fn()
 
     def _request_viewport_hydration(self, start_row: int) -> None:
         """Ask Handle 2 to hydrate only global rows mapped to the visible viewport."""
@@ -1068,7 +1361,6 @@ class VariantSplitView(Horizontal):
                     break
 
         self._command_tables_scroll_y(target_y)
-        self._schedule_fixed_post_layout_scroll(target_y=self._viewport_scroll_y, cursor_row=self.current_row_idx)
 
     # --- Vertical & Horizontal Navigation ---
 
@@ -1110,13 +1402,11 @@ class VariantSplitView(Horizontal):
             if hasattr(self.reader, "set_focus_row"):
                 self.reader.set_focus_row(target_row)
 
-        did_fetch = False
         if self._is_main_stream_view and self._active_global_indices is None:
             while self._get_active_row_count() <= target_row + 25:
                 needed = max(100, target_row - self._get_active_row_count() + 50)
                 if not self.fetch_more_rows(needed):
                     break
-                did_fetch = True
 
         active_count = self._get_active_row_count()
         if active_count == 0:
@@ -1134,7 +1424,7 @@ class VariantSplitView(Horizontal):
             target_y = target_row - visible_rows + 1
         target_y = max(0, min(self._get_max_scroll_y(), target_y))
 
-        saved_x = getattr(self.sample_table, "scroll_x", 0)
+        saved_x = self.sample_table.get_current_scroll_x()
         needs_sample_window_refresh = (
             target_y != self._sample_window_start
             or not self.records
@@ -1150,24 +1440,15 @@ class VariantSplitView(Horizontal):
         safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
         local_row = self._get_local_sample_cursor_row()
 
-        def _apply() -> None:
+        try:
             if sync_fixed and getattr(self.fixed_table, "row_count", 0) > target_row:
                 self._move_table_cursor(self.fixed_table, row=target_row, scroll=False)
             if sync_sample and getattr(self.sample_table, "row_count", 0) > local_row:
                 self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
-            try:
-                self.fixed_table.scroll_to(y=target_y, animate=False, force=True)
-                self.sample_table.scroll_to(x=saved_x, y=0, animate=False, force=True)
-            except Exception:
-                pass
-
-        try:
-            self._run_batched(_apply)
+            self.fixed_table.scroll_to_safe(y=target_y)
+            self.sample_table.scroll_to_safe(x=saved_x, y=0)
         finally:
             self._is_internal_update = False
-
-        if did_fetch:
-            self._schedule_fixed_post_layout_scroll(target_y=target_y, cursor_row=target_row)
 
         self._notify_selection(target_row, self.current_sample_idx)
 
@@ -1196,7 +1477,7 @@ class VariantSplitView(Horizontal):
         global_col: int,
         horizontal_align: Optional[str] = None,
     ) -> None:
-        """Move sample cursor horizontally across SampleMatrixTable at current local viewport row."""
+        """Move sample cursor horizontally across SampleMatrixTable and scroll viewport deterministically."""
         if not self.samples:
             return
         global_col = max(0, min(len(self.samples) - 1, global_col))
@@ -1210,26 +1491,16 @@ class VariantSplitView(Horizontal):
                     self.sample_table,
                     row=local_row,
                     column=global_col,
-                    scroll=True,
+                    scroll=(horizontal_align is None),
                 )
             if horizontal_align == "home":
-                try:
-                    self.sample_table.scroll_to(x=0, y=0, animate=False, force=True)
-                except Exception:
-                    pass
+                self.sample_table.scroll_to_safe(x=0, y=0)
             elif horizontal_align == "end":
-                try:
-                    max_x = max(0, int(getattr(self.sample_table, "max_scroll_x", 0) or 0))
-                    if max_x > 0:
-                        self.sample_table.scroll_to(x=max_x, y=0, animate=False, force=True)
-                except Exception:
-                    pass
+                max_x = self.sample_table.get_effective_max_scroll_x()
+                self.sample_table.scroll_to_safe(x=max_x, y=0)
             else:
-                try:
-                    if getattr(self.sample_table, "scroll_y", 0) != 0:
-                        self.sample_table.scroll_to(y=0, animate=False, force=True)
-                except Exception:
-                    pass
+                if getattr(self.sample_table, "scroll_y", 0) != 0:
+                    self.sample_table.scroll_to_safe(y=0)
         finally:
             self._is_internal_update = False
 
@@ -1238,7 +1509,7 @@ class VariantSplitView(Horizontal):
     # --- Data Loading, Filtering, View Modes, and In-Place Hydration ---
 
     def fetch_more_rows(self, batch_size: int = 100) -> bool:
-        """Pull newly streamed site rows into FixedArrowBuffer (supporting both Handle 1 and MockReader)."""
+        """Pull newly streamed site rows into FixedArrowBuffer without blocking the UI event loop."""
         if (
             not self.reader
             or self._is_fetching_more
@@ -1256,10 +1527,6 @@ class VariantSplitView(Horizontal):
             return False
 
         if hasattr(self.reader, "get_site_slice"):
-            if hasattr(self.reader, "_wait_for_site_index"):
-                self.reader._wait_for_site_index(current_loaded + batch_size)
-                if self.sync_fixed_buffer_from_reader() > 0:
-                    return True
             return False
 
         self._is_fetching_more = True
@@ -1284,29 +1551,25 @@ class VariantSplitView(Horizontal):
             self._observed_variant_count = max(self._observed_variant_count, self.fixed_buffer.row_count)
 
             self._is_internal_update = True
-            saved_x = getattr(self.sample_table, "scroll_x", 0)
+            saved_x = self.sample_table.get_current_scroll_x()
             saved_y = self._viewport_scroll_y
             active_count = self._get_active_row_count()
             safe_row = min(self.current_row_idx, active_count - 1) if active_count else 0
 
-            def _apply() -> None:
-                self._refresh_fixed_backend()
+            try:
+                if getattr(self.fixed_table, "backend", None) is None:
+                    self._refresh_fixed_backend()
+                else:
+                    self.fixed_table.sync_dimensions()
+                    self.fixed_table.refresh()
                 if active_count:
                     self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-                try:
-                    self.fixed_table.scroll_to(y=saved_y, animate=False, force=True)
-                except Exception:
-                    pass
-
-            try:
-                self._run_batched(_apply)
+                self.fixed_table.scroll_to_safe(y=saved_y)
             finally:
                 self._is_internal_update = False
 
             if len(self.records) < self._get_visible_row_count():
                 self._sync_sample_viewport_window(saved_y, saved_x=saved_x)
-            else:
-                self._schedule_fixed_post_layout_scroll(target_y=saved_y, cursor_row=safe_row)
 
             self._sync_sample_vertical_scrollbar()
             return True
@@ -1405,13 +1668,11 @@ class VariantSplitView(Horizontal):
             self._refresh_fixed_backend()
             if self._get_active_row_count() > 0:
                 self._move_table_cursor(self.fixed_table, row=0, scroll=False)
-            self.fixed_table.scroll_to(y=0, animate=False, force=True)
-        except Exception:
-            pass
+            self.fixed_table.scroll_to_safe(y=0)
         finally:
             self._is_internal_update = False
 
-        self._sync_sample_viewport_window(0, saved_x=0, force_rebind=True)
+        self._sync_sample_viewport_window(0, saved_x=0)
         self._last_notified = None
         self._notify_selection(0, self.current_sample_idx)
         return self._get_active_row_count()
@@ -1502,13 +1763,11 @@ class VariantSplitView(Horizontal):
             self._refresh_fixed_backend()
             if self._get_active_row_count() > 0:
                 self._move_table_cursor(self.fixed_table, row=0, scroll=False)
-            self.fixed_table.scroll_to(y=0, animate=False, force=True)
-        except Exception:
-            pass
+            self.fixed_table.scroll_to_safe(y=0)
         finally:
             self._is_internal_update = False
 
-        self._sync_sample_viewport_window(0, saved_x=0, force_rebind=True)
+        self._sync_sample_viewport_window(0, saved_x=0)
         self._last_notified = None
         self._notify_selection(0, self.current_sample_idx)
 
@@ -1522,29 +1781,23 @@ class VariantSplitView(Horizontal):
             self._refresh_fixed_backend()
             if active_count:
                 self._move_table_cursor(self.fixed_table, row=safe_row, scroll=False)
-            self.fixed_table.scroll_to(y=saved_y, animate=False, force=True)
-        except Exception:
-            pass
+            self.fixed_table.scroll_to_safe(y=saved_y)
         finally:
             self._is_internal_update = False
-        self._schedule_fixed_post_layout_scroll(target_y=saved_y, cursor_row=safe_row)
 
     def set_format_tag(self, tag: str):
         self.format_tag = tag.upper()
-        saved_x = getattr(self.sample_table, "scroll_x", 0)
+        saved_x = self.sample_table.get_current_scroll_x()
         local_row = self._get_local_sample_cursor_row()
         safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
         _clear_table_render_caches(self.sample_table)
-        try:
-            self.sample_table.refresh()
-        except Exception:
-            pass
         if getattr(self.sample_table, "backend", None) is None:
             self._refresh_sample_backend()
         if self.records:
             self._move_table_cursor(self.sample_table, row=local_row, column=safe_col, scroll=False)
+        self.sample_table.scroll_to_safe(x=saved_x, y=0)
         try:
-            self.sample_table.scroll_to(x=saved_x, y=0, animate=False, force=True)
+            self.sample_table.refresh()
         except Exception:
             pass
 
@@ -1574,35 +1827,28 @@ class VariantSplitView(Horizontal):
             self._last_viewport_rows = vp_rows
             self._sync_sample_viewport_window(
                 self._viewport_scroll_y,
-                saved_x=getattr(self.sample_table, "scroll_x", 0),
+                saved_x=self.sample_table.get_current_scroll_x(),
             )
 
-    # --- Click-only selection sync (ignores programmatic cursor moves) ---
-
-    @on(FastDataTable.RowHighlighted)
-    def on_fast_data_table_row_highlighted(self, event: FastDataTable.RowHighlighted) -> None:
-        if self._rebuilding or self._is_fetching_more or self._is_internal_update or not self._accept_next_highlight:
+    def _handle_table_click(
+        self,
+        table: _PassiveSplitTable,
+        data_row: int,
+        col_idx: int,
+    ) -> None:
+        if self._rebuilding or self._is_fetching_more or self._is_internal_update:
             return
-        self._disarm_click_sync()
-        tbl = getattr(event, "data_table", None) or getattr(event, "control", None)
-        if tbl is not None and getattr(tbl, "id", None) == "fixed_table":
-            target_row = getattr(event, "cursor_row", None)
-            if target_row is None and hasattr(event, "coordinate"):
-                target_row = event.coordinate.row
-            if target_row is not None:
-                self.set_active_row(int(target_row), sync_fixed=False, sync_sample=True)
-
-    @on(FastDataTable.CellHighlighted)
-    def on_fast_data_table_cell_highlighted(self, event: FastDataTable.CellHighlighted) -> None:
-        if self._rebuilding or self._is_fetching_more or self._is_internal_update or not self._accept_next_highlight:
-            return
-        self._disarm_click_sync()
-        tbl = getattr(event, "data_table", None) or getattr(event, "control", None)
-        if tbl is not None and getattr(tbl, "id", None) == "sample_table":
-            local_row = int(event.coordinate.row)
-            target_display_row = self._sample_window_start + local_row
-            self.current_sample_idx = int(event.coordinate.column)
-            self.set_active_row(target_display_row, sync_fixed=True, sync_sample=False)
+        if table.id == "fixed_table":
+            self.set_active_row(int(data_row), sync_fixed=True, sync_sample=True)
+        elif table.id == "sample_table":
+            target_display_row = self._sample_window_start + int(data_row)
+            if self.samples:
+                self.current_sample_idx = max(0, min(len(self.samples) - 1, int(col_idx)))
+            self.set_active_row(target_display_row, sync_fixed=True, sync_sample=True)
+        try:
+            self.focus()
+        except Exception:
+            pass
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int) -> None:
         if self._split_view_closing:

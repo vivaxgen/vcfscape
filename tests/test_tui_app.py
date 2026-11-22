@@ -182,8 +182,24 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
             await pilot.press("right")
             await pilot.pause()
             self.assertEqual(app.table_widget.current_sample_idx, 1)
+            self.assertEqual(app.table_widget.sample_table.cursor_coordinate.column, 1)
 
-            await pilot.press("left", "up")
+            await pilot.press("end")
+            await pilot.pause()
+            self.assertEqual(app.table_widget.current_sample_idx, len(app.reader.samples) - 1)
+            self.assertEqual(
+                app.table_widget.sample_table.cursor_coordinate.column,
+                len(app.reader.samples) - 1,
+            )
+            self.assertGreater(app.table_widget.sample_table.scroll_x, 0)
+
+            await pilot.press("home")
+            await pilot.pause()
+            self.assertEqual(app.table_widget.current_sample_idx, 0)
+            self.assertEqual(app.table_widget.sample_table.cursor_coordinate.column, 0)
+            self.assertEqual(app.table_widget.sample_table.scroll_x, 0)
+
+            await pilot.press("right", "left", "up")
             await pilot.pause()
             self.assertEqual(app.table_widget.current_row_idx, 0)
             self.assertEqual(app.table_widget.current_sample_idx, 0)
