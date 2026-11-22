@@ -134,6 +134,9 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertTrue(hasattr(fixed_table, "on_mouse_scroll_right"))
         self.assertTrue(hasattr(split_view, "handle_navigation_key"))
         self.assertTrue(hasattr(split_view, "handle_mouse_scroll"))
+        split_view.stop_timers()
+        self.assertTrue(split_view._split_view_closing)
+        self.assertFalse(getattr(split_view, "_closing", False))
 
     def test_variant_split_view_cursor_sync_and_deduplication(self):
         split_view = self.app.table_widget

@@ -22,26 +22,26 @@ class AnimatedSpinner(Static):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._frame_idx = 0
-        self._timer = None
-        self._stopped = False
+        self._spinner_timer = None
+        self._spinner_stopped = False
 
     def on_mount(self) -> None:
-        if self._stopped:
+        if self._spinner_stopped:
             return
         self.update_spinner()
-        self._timer = self.set_interval(0.08, self.update_spinner)
+        self._spinner_timer = self.set_interval(0.08, self.update_spinner)
 
     def on_unmount(self) -> None:
-        self._stopped = True
-        if self._timer is not None:
+        self._spinner_stopped = True
+        if self._spinner_timer is not None:
             try:
-                self._timer.stop()
+                self._spinner_timer.stop()
             except Exception:
                 pass
-            self._timer = None
+            self._spinner_timer = None
 
     def update_spinner(self) -> None:
-        if self._stopped:
+        if self._spinner_stopped:
             return
         frame = SPINNER_FRAMES[self._frame_idx % len(SPINNER_FRAMES)]
         self._frame_idx += 1
@@ -150,10 +150,10 @@ class VcfLoadingScreen(ModalScreen[Optional[int]]):
     def _stop_spinner(self) -> None:
         try:
             spinner = self.query_one("#loading_spinner", AnimatedSpinner)
-            spinner._stopped = True
-            if spinner._timer is not None:
-                spinner._timer.stop()
-                spinner._timer = None
+            spinner._spinner_stopped = True
+            if spinner._spinner_timer is not None:
+                spinner._spinner_timer.stop()
+                spinner._spinner_timer = None
         except Exception:
             pass
 

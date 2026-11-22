@@ -190,7 +190,7 @@ def _apply_arrow_backend_to_table(
     if new_backend is None:
         return
     sv = getattr(table, "split_view", None)
-    if getattr(sv, "_closing", False):
+    if getattr(sv, "_split_view_closing", False):
         return
 
     if column_labels is None:
@@ -398,7 +398,7 @@ class VariantSplitView(Horizontal):
         self.samples = list(samples)
         self._is_internal_update = False
         self._accept_next_highlight = False
-        self._closing = False
+        self._split_view_closing = False
         self._click_timer: Optional[Any] = None
         self.current_row_idx = 0
         self.current_sample_idx = 0
@@ -601,7 +601,7 @@ class VariantSplitView(Horizontal):
         event.stop()
 
     def _arm_click_sync(self) -> None:
-        if self._closing:
+        if self._split_view_closing:
             return
         self._accept_next_highlight = True
         if self._click_timer is not None:
@@ -616,7 +616,7 @@ class VariantSplitView(Horizontal):
             pass
 
     def stop_timers(self) -> None:
-        self._closing = True
+        self._split_view_closing = True
         self._accept_next_highlight = False
         if self._click_timer is not None:
             try:
@@ -980,7 +980,7 @@ class VariantSplitView(Horizontal):
 
     def hydrate_rows(self, row_indices: List[int]) -> None:
         """Patch hydrated sample rows into SampleArrowBuffer and refresh visible matrix."""
-        if self._closing or not self.reader or not self._is_main_stream_view:
+        if self._split_view_closing or not self.reader or not self._is_main_stream_view:
             return
         try:
             if getattr(self.app, "_vcfscape_closing", False):
@@ -1001,7 +1001,7 @@ class VariantSplitView(Horizontal):
                     if idx == self.current_row_idx:
                         updated_current = True
 
-        if not hydrated_map or self._closing:
+        if not hydrated_map or self._split_view_closing:
             return
 
         if self.sample_buffer.hydrate_rows(list(hydrated_map.keys()), hydrated_map):
@@ -1009,7 +1009,7 @@ class VariantSplitView(Horizontal):
             self._is_internal_update = True
 
             def _apply() -> None:
-                if self._closing:
+                if self._split_view_closing:
                     return
                 self._refresh_sample_backend()
                 safe_col = max(0, min(len(self.samples) - 1, self.current_sample_idx)) if self.samples else 0
@@ -1031,7 +1031,7 @@ class VariantSplitView(Horizontal):
             finally:
                 self._is_internal_update = False
 
-        if updated_current and not self._closing and 0 <= self.current_row_idx < len(self.records):
+        if updated_current and not self._split_view_closing and 0 <= self.current_row_idx < len(self.records):
             self._last_notified = None
             self._notify_selection(self.current_row_idx, self.current_sample_idx)
 
@@ -1151,7 +1151,7 @@ class VariantSplitView(Horizontal):
             self.set_active_row(target_row, sync_fixed=True, sync_sample=False)
 
     def _notify_selection(self, row_idx: int, sample_col_idx: int) -> None:
-        if self._closing:
+        if self._split_view_closing:
             return
         if 0 <= row_idx < len(self.records):
             coord = (row_idx, sample_col_idx)
