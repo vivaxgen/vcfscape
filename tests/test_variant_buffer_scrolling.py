@@ -1,6 +1,6 @@
 """
-Unit tests for VariantSplitView dynamic appending, native all-sample horizontal navigation,
-top-widget key/mouse-wheel capture, and lockstep vertical scrolling.
+Unit tests for VariantSplitView dynamic appending, in-place sample hydration without
+backend resets, top-widget key/mouse-wheel capture, and lockstep scrolling.
 """
 
 import sys
@@ -136,6 +136,53 @@ class TestVariantBufferScrolling(unittest.TestCase):
             sv.advance_row(forward=False)
             self.assertEqual(sv.current_row_idx, expected_global)
             self.assertEqual(sv.records[sv.current_row_idx].var_id, f"var_{expected_global}")
+
+    def test_in_place_hydration_preserves_backend_and_scroll_state(self):
+        """Hydrating unhydrated rows must update live cells in place without swapping sample_table.backend."""
+        placeholder_recs = [
+            VariantRecord(
+                chrom="Pf3D7_07_v3",
+                pos=1000 + i * 50,
+                var_id=f"var_{i}",
+                ref="A",
+                alt=["T"],
+                qual=99.0,
+                filter_str="PASS",
+                info={},
+                format_keys=["GT", "DP"],
+                sample_data={},
+                genotypes={},
+                depths={},
+                ad={},
+                samples_loaded=False,
+            )
+            for i in range(40)
+        ]
+
+        class HydratingMockReader:
+            def __init__(self, hydrated_records):
+                self._hydrated = hydrated_records
+                self.total_variants_ready = True
+                self.samples = ["S1"]
+            def get_total_variants_async(self):
+                return len(self._hydrated)
+            def get_hydrated_record(self, row_idx):
+                return self._hydrated[row_idx]
+
+        reader = HydratingMockReader(self.records[:40])
+        sv = VariantSplitView(placeholder_recs, ["S1"], reader=reader)
+        initial_backend = sv.sample_table.backend
+
+        # Placeholder cell before hydration
+        self.assertEqual(sv.sample_table.backend.get_cell_at(5, 0).plain, "...")
+
+        sv.set_active_row(5)
+        sv.hydrate_rows([5, 6, 7])
+
+        # Backend object identity must stay unchanged (no set_backend reset)
+        self.assertIs(sv.sample_table.backend, initial_backend)
+        self.assertEqual(sv.current_row_idx, 5)
+        self.assertEqual(sv.sample_table.backend.get_cell_at(5, 0).plain, "0/1")
 
     def test_top_widget_key_and_wheel_capture(self):
         """Verify VariantSplitView captures Up/Down/PageUp/PageDown/Home/End and mouse wheel cleanly."""

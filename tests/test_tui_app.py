@@ -1,14 +1,17 @@
 """
-Unit tests for MalariaVcfApp TUI actions, hotkeys, and theme toggling.
+Unit tests for VcfscapeApp TUI actions, hotkeys, theme toggling, scrolling, and clean exit.
 """
 
+import gzip
 import sys
 import os
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 try:
+    import cyvcf2  # noqa: F401
     import textual
     import textual_fastdatatable
     import pyarrow
@@ -16,29 +19,32 @@ try:
     TEXTUAL_AVAILABLE = True
 except ImportError:
     TEXTUAL_AVAILABLE = False
+    VcfscapeApp = None
     MalariaVcfApp = None
 
 DEMO_VCF = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "examples", "pf3d7_surveillance_demo.vcf")
 )
 
-@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow not installed in this environment")
+
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow / cyvcf2 not installed")
 class TestMalariaVcfApp(unittest.TestCase):
 
     def setUp(self):
         self.app = MalariaVcfApp(DEMO_VCF)
 
+    def tearDown(self):
+        if hasattr(self, "app") and hasattr(self.app, "reader"):
+            self.app.reader.close(wait=True, timeout=0.5)
+
     def test_theme_toggle_action(self):
-        # Default state should not have theme-light
         self.assertNotIn("theme-light", self.app.classes)
-        
-        # Toggle to light theme
+
         self.app.action_toggle_theme()
         self.assertIn("theme-light", self.app.classes)
         self.assertFalse(self.app.dark)
         self.assertIn("LIGHT", self.app.footer_bar.log_message)
 
-        # Toggle back to dark theme
         self.app.action_toggle_theme()
         self.assertNotIn("theme-light", self.app.classes)
         self.assertTrue(self.app.dark)
@@ -60,47 +66,38 @@ class TestMalariaVcfApp(unittest.TestCase):
 
     def test_cohort_stats_pane_resizing(self):
         pane = self.app.stats_pane
-        # Initial state: pane is collapsed on initial start
         self.assertEqual(pane.current_height, 8)
         self.assertTrue(pane.is_collapsed)
 
-        # Grow pane by 2 rows
         new_h = pane.resize_by(2)
         self.assertEqual(new_h, 10)
         self.assertEqual(pane.current_height, 10)
 
-        # Shrink pane by 3 rows
         new_h = pane.resize_by(-3)
         self.assertEqual(new_h, 7)
         self.assertEqual(pane.current_height, 7)
 
-        # Test upper clamp
         new_h = pane.set_height(100)
         self.assertEqual(new_h, pane.MAX_HEIGHT)
         self.assertEqual(pane.current_height, pane.MAX_HEIGHT)
 
-        # Test lower clamp (set_height expands collapsed pane cleanly)
         new_h = pane.set_height(0)
         self.assertEqual(new_h, pane.MIN_HEIGHT)
         self.assertEqual(pane.current_height, pane.MIN_HEIGHT)
         self.assertFalse(pane.is_collapsed)
 
-        # Collapse pane first before testing collapsed -> expanded -> collapsed toggles
         is_expanded = pane.toggle_pane()
         self.assertFalse(is_expanded)
         self.assertTrue(pane.is_collapsed)
 
-        # From collapsed, 1st toggle expands it
         is_expanded = pane.toggle_pane()
         self.assertTrue(is_expanded)
         self.assertFalse(pane.is_collapsed)
 
-        # 2nd toggle collapses it
         is_expanded = pane.toggle_pane()
         self.assertFalse(is_expanded)
         self.assertTrue(pane.is_collapsed)
 
-        # Resizing while collapsed should expand and apply new height
         new_h = pane.resize_by(3)
         self.assertFalse(pane.is_collapsed)
         self.assertEqual(new_h, pane.MIN_HEIGHT + 3)
@@ -121,6 +118,7 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIn("-", bindings)
         self.assertEqual(bindings["-"], "resize_split_down")
         self.assertIn("ctrl+up", bindings)
+
     def test_top_widget_focus_and_passive_tables(self):
         split_view = self.app.table_widget
         fixed_table = split_view.fixed_table
@@ -146,15 +144,13 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertEqual(split_view.sample_table.peer_table, split_view.fixed_table)
 
     def test_sample_matrix_table_visible_and_populated(self):
-        """Verifies SampleMatrixTable divider width is locked to 1 and styling is set."""
         split_view = self.app.table_widget
         self.assertEqual(split_view.divider.styles.width.value, 1)
-        self.assertEqual(split_view.sample_table.styles.width.value, 1)  # 1fr
+        self.assertEqual(split_view.sample_table.styles.width.value, 1)
         self.assertIsNotNone(split_view.sample_table)
         self.assertIsNotNone(split_view.fixed_table)
 
     def test_sidebar_panel_widgets_configured(self):
-        """Verifies SidebarPanel contains all 3 widgets in requested order with proper initial content."""
         sb = self.app.sidebar_panel
         self.assertIsNotNone(sb.variant_summary)
         self.assertIsNotNone(sb.cohort_widget)
@@ -163,15 +159,14 @@ class TestMalariaVcfApp(unittest.TestCase):
         self.assertIn("COHORTS & FILTERS", sb.cohort_widget.render().plain)
         self.assertIn("CELL INSPECTOR", sb.cell_inspector.render().plain)
 
-        # Verify exact compose order: CohortListWidget, VariantSummary, CellInspector
         composed_widgets = list(sb.children) if sb.children else list(sb.compose())
         children = [c.__class__.__name__ for c in composed_widgets]
         self.assertEqual(children, ["CohortListWidget", "VariantSummary", "CellInspector"])
 
 
-@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow not installed in this environment")
+@unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual / textual-fastdatatable / pyarrow / cyvcf2 not installed")
 class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
-    """Headless Textual pilot tests verifying MainScreen responsiveness, navigation, and exit."""
+    """Headless Textual pilot tests verifying direct screen navigation, scrolling, and clean exit."""
 
     async def test_demo_startup_navigation_and_q_exit(self):
         app = VcfscapeApp(DEMO_VCF)
@@ -211,26 +206,51 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app._vcfscape_closing)
         self.assertFalse(app.is_running)
 
-    async def test_large_gzipped_vcf_q_exit_cleanly(self):
-        import gzip
-        import tempfile
-
+    async def test_large_gzipped_vcf_scrolling_and_q_exit_cleanly(self):
         with tempfile.NamedTemporaryFile(suffix=".vcf.gz", delete=False) as tf:
             gz_path = tf.name
 
         try:
+            samples = [f"S_{i:02d}" for i in range(40)]
+            header = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples) + "\n"
+            calls = "\t".join(["0/1:30" for _ in samples])
             with gzip.open(gz_path, "wt", encoding="utf-8") as f:
                 f.write("##fileformat=VCFv4.2\n")
                 f.write("##contig=<ID=Pf3D7_07_v3,length=1445207>\n")
-                f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n")
+                f.write("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n")
+                f.write("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n")
+                f.write(header)
                 for i in range(1200):
                     f.write(
-                        f"Pf3D7_07_v3\t{1000 + i * 10}\tvar_{i}\tA\tT\t99\tPASS\t.\tGT:DP\t0/1:30\t0/0:25\n"
+                        f"Pf3D7_07_v3\t{1000 + i * 10}\tvar_{i}\tA\tT\t99\tPASS\t.\tGT:DP\t{calls}\n"
                     )
 
             app = VcfscapeApp(gz_path)
             async with app.run_test(size=(120, 36)) as pilot:
                 await pilot.pause()
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertIs(app.focused, app.table_widget)
+
+                # Vertical & horizontal navigation across big gzipped VCF
+                await pilot.press("pagedown", "pagedown", "down")
+                await pilot.pause()
+                self.assertGreater(app.table_widget.current_row_idx, 30)
+                self.assertEqual(
+                    app.table_widget.sample_table.cursor_coordinate.row,
+                    app.table_widget.current_row_idx,
+                )
+
+                await pilot.press("end")
+                await pilot.pause()
+                self.assertEqual(app.table_widget.current_sample_idx, 39)
+                self.assertEqual(app.table_widget.sample_table.cursor_coordinate.column, 39)
+                self.assertGreater(app.table_widget.sample_table.scroll_x, 0)
+
+                await pilot.press("home")
+                await pilot.pause()
+                self.assertEqual(app.table_widget.current_sample_idx, 0)
+                self.assertEqual(app.table_widget.sample_table.cursor_coordinate.column, 0)
+
                 await pilot.press("q")
                 await pilot.pause()
                 self.assertTrue(app._vcfscape_closing)

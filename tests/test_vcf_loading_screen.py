@@ -1,122 +1,59 @@
 """
-Unit tests for VcfLoadingScreen and VcfReader progress reporting.
+Unit tests for inline HeaderBar / FooterBar progress reporting and VcfReader callbacks.
 """
 
 import os
 import sys
+import tempfile
 import unittest
-from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 try:
-    import textual
-    from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen, AnimatedSpinner
+    import cyvcf2  # noqa: F401
+    CYVCF2_AVAILABLE = True
 except ImportError:
-    class MockWidget:
-        def __init__(self, *args, **kwargs):
-            self.styles = type("Styles", (), {"width": 1, "min_width": 1, "max_width": 1, "height": "100%"})()
-            self._text = ""
-        def update(self, text):
-            self._text = str(text)
-        def query_one(self, selector, expected_type=None):
-            return self
+    CYVCF2_AVAILABLE = False
 
-    class MockScreen(MockWidget):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._dismissed = False
-            self._result = None
-        def dismiss(self, result=None):
-            self._dismissed = True
-            self._result = result
-        def __class_getitem__(cls, item):
-            return cls
-
-    sys.modules["textual"] = MagicMock()
-    sys.modules["textual.screen"] = MagicMock()
-    sys.modules["textual.screen"].ModalScreen = MockScreen
-    sys.modules["textual.app"] = MagicMock()
-    sys.modules["textual.widget"] = MagicMock()
-    sys.modules["textual.widget"].Widget = MockWidget
-    sys.modules["textual.widgets"] = MagicMock()
-    MockWidget.Pressed = type("Pressed", (), {})
-    sys.modules["textual.widgets"].Static = MockWidget
-    sys.modules["textual.widgets"].Button = MockWidget
-    sys.modules["textual.containers"] = MagicMock()
-    sys.modules["textual.binding"] = MagicMock()
-    sys.modules["rich.text"] = MagicMock()
-    sys.modules["rich.text"].Text = lambda x, **kw: x
-
-    from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen, AnimatedSpinner
+try:
+    import textual  # noqa: F401
+    from vcfscape.ui.widgets.header_bar import HeaderBar
+    from vcfscape.ui.widgets.footer_bar import FooterBar
+    TEXTUAL_AVAILABLE = True
+except ImportError:
+    HeaderBar = None
+    FooterBar = None
+    TEXTUAL_AVAILABLE = False
 
 
-class TestVcfLoadingScreen(unittest.TestCase):
+class TestInlineProgressReporting(unittest.TestCase):
 
-    def test_loading_screen_initialization(self):
-        screen = VcfLoadingScreen(filename="cohort_malaria.vcf.gz")
-        self.assertEqual(screen.filename, "cohort_malaria.vcf.gz")
-        self.assertFalse(screen.is_completed)
-        self.assertEqual(screen._current_count, 0)
+    @unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual not installed in this environment")
+    def test_header_bar_inline_counting_progress_rendering(self):
+        hb = HeaderBar(filename="cohort_malaria.vcf.gz", total_variants=None, total_samples=12)
+        self.assertIn("Counting...", hb.render().plain)
 
-    def test_update_progress(self):
-        screen = VcfLoadingScreen(filename="cohort_malaria.vcf.gz")
-        screen.update_progress(15000)
-        self.assertEqual(screen._current_count, 15000)
+        hb.counting_progress = 15000
+        self.assertIn("Counting (15,000)...", hb.render().plain)
 
-        screen.update_progress(45000)
-        self.assertEqual(screen._current_count, 45000)
+        hb.total_variants = 52400
+        rendered = hb.render().plain
+        self.assertIn("52,400", rendered)
+        self.assertNotIn("Counting", rendered)
 
-    def test_mark_complete_auto_dismisses(self):
-        screen = VcfLoadingScreen(filename="cohort_malaria.vcf.gz")
-        screen.mark_complete(52400)
-        self.assertTrue(screen.is_completed)
-        self.assertEqual(screen._current_count, 52400)
+    @unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual not installed in this environment")
+    def test_footer_bar_inline_progress_log(self):
+        fb = FooterBar()
+        fb.set_log("Indexing variants in background: 2,000 sites...")
+        self.assertIn("2,000 sites", fb.render().plain)
 
-    def test_dismiss_action(self):
-        screen = VcfLoadingScreen(filename="cohort_malaria.vcf.gz")
-        screen.update_progress(10000)
-        screen.action_dismiss_screen()
-        # Verify dismissal was invoked without errors
+        fb.set_log("VCF file indexing complete: 2,500 total variants.")
+        self.assertIn("2,500 total variants", fb.render().plain)
 
-    def test_idempotent_dismiss_and_root_stack_guard(self):
-        screen = VcfLoadingScreen(filename="cohort_malaria.vcf.gz")
-        dismiss_calls = []
-        screen.dismiss = lambda result=None: dismiss_calls.append(result)
-
-        # Calling Esc then mark_complete should only dismiss once
-        screen.update_progress(250)
-        screen.action_dismiss_screen()
-        screen.mark_complete(500)
-        self.assertEqual(dismiss_calls, [250])
-
-        # Root stack guard: if screen_stack has only 1 screen, _safe_dismiss must not dismiss
-        dismiss_calls_2 = []
-        fake_app = type("FakeApp", (), {"screen_stack": [object()], "screen": None})()
-
-        class GuardedScreen(VcfLoadingScreen):
-            @property
-            def app(self):
-                return fake_app
-
-        screen3 = GuardedScreen(filename="cohort_malaria.vcf.gz")
-        fake_app.screen = screen3
-        screen3.dismiss = lambda result=None: dismiss_calls_2.append(result)
-        screen3.action_dismiss_screen()
-        self.assertEqual(dismiss_calls_2, [])
-        self.assertFalse(screen3._dismiss_requested)
-
-        # When modal sits above MainScreen (len(screen_stack) == 2), it dismisses cleanly once
-        fake_app.screen_stack = [object(), screen3]
-        screen3.mark_complete(500)
-        self.assertEqual(dismiss_calls_2, [500])
-        self.assertTrue(screen3._dismiss_requested)
-
+    @unittest.skipUnless(CYVCF2_AVAILABLE, "cyvcf2 not installed in this environment")
     def test_vcf_reader_progress_callbacks(self):
         from vcfscape.core.vcf_reader import VcfReader
-        import tempfile
 
-        # Create a small temp VCF
         with tempfile.NamedTemporaryFile(mode="w", suffix=".vcf", delete=False) as f:
             f.write("##fileformat=VCFv4.2\n")
             f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n")
@@ -126,23 +63,26 @@ class TestVcfLoadingScreen(unittest.TestCase):
 
         try:
             reader = VcfReader(temp_path, lazy=True)
-            progress_calls = []
-            total_calls = []
+            try:
+                progress_calls = []
+                total_calls = []
 
-            reader.add_progress_callback(lambda count: progress_calls.append(count))
-            reader.add_total_variants_callback(lambda count: total_calls.append(count))
+                reader.add_progress_callback(lambda count: progress_calls.append(count))
+                reader.add_total_variants_callback(lambda count: total_calls.append(count))
 
-            self.assertEqual(reader.total_variants, 25)
-            self.assertTrue(len(total_calls) > 0)
-            self.assertEqual(total_calls[-1], 25)
+                self.assertEqual(reader.total_variants, 25)
+                self.assertTrue(len(total_calls) > 0)
+                self.assertEqual(total_calls[-1], 25)
+            finally:
+                reader.close()
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    @unittest.skipUnless(CYVCF2_AVAILABLE, "cyvcf2 not installed in this environment")
     def test_async_uncompressed_vcf_indexing_progress(self):
-        """Verify uncompressed VCF starts immediately and streams progress callbacks."""
+        """Verify uncompressed VCF starts immediately via cyvcf2 and streams progress callbacks."""
         from vcfscape.core.vcf_reader import VcfReader
-        import tempfile
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".vcf", delete=False) as f:
             f.write("##fileformat=VCFv4.2\n")
@@ -154,26 +94,24 @@ class TestVcfLoadingScreen(unittest.TestCase):
 
         try:
             reader = VcfReader(temp_path, lazy=True)
-            # Immediate slice retrieval should succeed instantly
-            init_slice = reader.get_slice(0, 10)
-            self.assertEqual(len(init_slice), 10)
-            self.assertEqual(init_slice[0].var_id, "var_0")
+            try:
+                init_slice = reader.get_slice(0, 10)
+                self.assertEqual(len(init_slice), 10)
+                self.assertEqual(init_slice[0].var_id, "var_0")
 
-            progress_counts = []
-            reader.add_progress_callback(lambda count: progress_counts.append(count))
+                progress_counts = []
+                reader.add_progress_callback(lambda count: progress_counts.append(count))
 
-            # Total variants waits for background worker to complete
-            total = reader.total_variants
-            self.assertEqual(total, 2500)
-            self.assertTrue(reader.total_variants_ready)
-            self.assertTrue(len(progress_counts) > 0)
-            self.assertEqual(progress_counts[-1], 2500)
+                total = reader.total_variants
+                self.assertEqual(total, 2500)
+                self.assertTrue(reader.total_variants_ready)
+                self.assertTrue(len(progress_counts) > 0)
+                self.assertEqual(progress_counts[-1], 2500)
+            finally:
+                reader.close()
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-            idx_cache = os.path.join(os.path.dirname(temp_path), f".{os.path.basename(temp_path)}.vcfscape.idx")
-            if os.path.exists(idx_cache):
-                os.remove(idx_cache)
 
 
 if __name__ == "__main__":

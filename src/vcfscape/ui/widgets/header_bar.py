@@ -1,6 +1,6 @@
 """
 HeaderBar Widget for VCFscape - VCF inspector part of vivaxGEN Project.
-Compact, single-line borderless header displaying essential metadata.
+Compact, single-line borderless header displaying essential metadata and inline counting progress.
 """
 
 from typing import Optional
@@ -8,16 +8,18 @@ from textual.widget import Widget
 from textual.reactive import reactive
 from rich.text import Text
 
+
 class HeaderBar(Widget):
-    """Header bar rendering filename, genome, counts, view mode, and format tag."""
+    """Header bar rendering filename, genome, counts, inline progress, view mode, and format tag."""
 
     filename = reactive("")
     total_variants = reactive(None)
+    counting_progress = reactive(0)
     total_samples = reactive(0)
     view_mode = reactive("Normal")
     format_tag = reactive("GT")
     active_cohorts = reactive(1)
-    backend = reactive("cyvcf2")
+    backend = reactive("cyvcf2_dual")
 
     def __init__(
         self,
@@ -41,10 +43,10 @@ class HeaderBar(Widget):
         text.append("Pf3D7_v3", style="bold yellow")
         text.append(" │ ", style="bright_black")
         text.append("Vars: ", style="dim")
-        if isinstance(self.total_variants, int) and self.total_variants > 0:
+        if isinstance(self.total_variants, int) and self.total_variants >= 0:
             text.append(f"{self.total_variants:,}", style="bold green")
-        elif self.total_variants == 0:
-            text.append("0", style="bold green")
+        elif self.counting_progress > 0:
+            text.append(f"Counting ({self.counting_progress:,})...", style="italic bright_cyan")
         else:
             text.append("Counting...", style="italic bright_cyan")
         text.append(" │ ", style="bright_black")

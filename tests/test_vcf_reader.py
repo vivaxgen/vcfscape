@@ -7,17 +7,31 @@ import os
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+
+try:
+    import cyvcf2  # noqa: F401
+    CYVCF2_AVAILABLE = True
+except ImportError:
+    CYVCF2_AVAILABLE = False
+
 from vcfscape.core.vcf_reader import VcfReader
 
 DEMO_VCF = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "examples", "pf3d7_surveillance_demo.vcf")
 )
 
+
+@unittest.skipUnless(CYVCF2_AVAILABLE, "cyvcf2 not installed in this environment")
 class TestVcfReader(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         cls.reader = VcfReader(DEMO_VCF)
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "reader") and cls.reader is not None:
+            cls.reader.close()
 
     def test_samples_loaded(self):
         self.assertEqual(len(self.reader.samples), 24)

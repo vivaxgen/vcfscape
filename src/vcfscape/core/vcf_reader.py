@@ -1,35 +1,36 @@
 """
-High-performance VCF Reader with Dual cyvcf2 Handles & Pre-Open Index Guard:
-1. Enforces a pre-open >100 MB unindexed file check before opening any file handle.
-2. Handle 1 (Site Reader): Opens cyvcf2.VCF(path, samples=[]) to stream ONLY minimal core
-   variant fields (CHROM, POS, ID, REF, ALT, QUAL, FILTER) across all rows without allocating
-   per-row INFO dicts, FORMAT lists, or annotation lookups.
-3. Handle 2 (Viewport Sample Reader): Hydrates ONLY requested viewport windows on demand into a
-   thread-safe LRU cache using Tabix / SparseIndex / bounded seek, coalescing rapid requests.
+High-performance Mandatory cyvcf2 Dual-Handle VCF Reader with Pre-Open Index Guard:
+1. Enforces a pre-open >100 MB unindexed file check (.tbi / .csi) before opening any handle.
+2. Requires cyvcf2 for all VCF/VCF.GZ/BCF parsing (no pure-Python fallback parsers).
+3. Handle 1 (Site Reader): Opens cyvcf2.VCF(path, samples=[]) to stream minimal core
+   variant fields (CHROM, POS, ID, REF, ALT, QUAL, FILTER) without allocating per-row
+   INFO dicts, FORMAT lists, or sample genotypes across background rows.
+4. Handle 2 (Viewport Sample Reader): Hydrates requested viewport windows on demand into a
+   thread-safe RecordLruCache using Tabix/CSI region queries or bounded cyvcf2 scan.
 """
 
 from __future__ import annotations
 
 import os
-import gzip
 import time
 import threading
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
 from vcfscape.core.malaria_db import MalariaAnnotationDB, MarkerAnnotation
-from vcfscape.core.indexer import SparseVcfIndex, RecordLruCache
+from vcfscape.core.indexer import RecordLruCache
 
 try:
     import cyvcf2
-    HAS_CYVCF2 = True
-except ImportError:
-    HAS_CYVCF2 = False
+    _CYVCF2_IMPORT_ERROR: Optional[BaseException] = None
+except ImportError as exc:
+    cyvcf2 = None  # type: ignore
+    _CYVCF2_IMPORT_ERROR = exc
 
 LARGE_UNINDEXED_THRESHOLD_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
 class UnindexedLargeVcfError(Exception):
-    """Raised before opening a VCF file when size > 100 MB and no index is available."""
+    """Raised before opening a VCF file when size > 100 MB and no .tbi/.csi index is available."""
 
     def __init__(self, filepath: str, file_size_bytes: int, suggested_command: str):
         self.filepath = os.path.abspath(filepath)
@@ -44,22 +45,16 @@ class UnindexedLargeVcfError(Exception):
 
 
 def has_vcf_index(filepath: str) -> bool:
-    """Check if an index exists for the given VCF/BCF file using filesystem checks ONLY."""
+    """Check if a Tabix (.tbi) or CSI (.csi) index exists via filesystem checks only."""
     abs_path = os.path.abspath(filepath)
-    if os.path.exists(f"{abs_path}.tbi") or os.path.exists(f"{abs_path}.csi"):
-        return True
-    lower = abs_path.lower()
-    if not (lower.endswith(".gz") or lower.endswith(".bgz") or lower.endswith(".bcf")):
-        if SparseVcfIndex.has_cached_index(abs_path):
-            return True
-    return False
+    return os.path.exists(f"{abs_path}.tbi") or os.path.exists(f"{abs_path}.csi")
 
 
 def check_vcf_index_requirement(
     filepath: str,
     max_unindexed_bytes: int = LARGE_UNINDEXED_THRESHOLD_BYTES,
 ) -> None:
-    """Enforce index requirement for VCF files larger than 100 MB before opening the file."""
+    """Enforce index requirement for VCF/BCF files larger than 100 MB before opening the file."""
     abs_path = os.path.abspath(filepath)
     if not os.path.exists(abs_path):
         return
@@ -229,46 +224,6 @@ class VariantRecord:
         return 1 + len(self.alt)
 
 
-def _parse_info_str(info_raw: str) -> Dict[str, Any]:
-    info_dict: Dict[str, Any] = {}
-    if info_raw and info_raw != ".":
-        for item in info_raw.split(";"):
-            if "=" in item:
-                k, v = item.split("=", 1)
-                info_dict[k] = v
-            else:
-                info_dict[item] = True
-    return info_dict
-
-
-def _minimal_site_from_line(line: str) -> Optional[_MinimalSite]:
-    """Minimal pure-Python site parser extracting ONLY columns 0..6 (skips INFO, FORMAT, samples)."""
-    line = line.rstrip("\r\n")
-    if not line or line.startswith("#"):
-        return None
-    parts = line.split("\t", 7)
-    if len(parts) < 7:
-        return None
-    try:
-        pos = int(parts[1])
-    except ValueError:
-        return None
-    alt = tuple(parts[4].split(",")) if parts[4] != "." else ()
-    try:
-        qual = float(parts[5]) if parts[5] != "." else None
-    except ValueError:
-        qual = None
-    return _MinimalSite(
-        chrom=parts[0],
-        pos=pos,
-        var_id=parts[2],
-        ref=parts[3],
-        alt=alt,
-        qual=qual,
-        filter_str=parts[6],
-    )
-
-
 def _minimal_site_from_cyvcf2(v: Any) -> _MinimalSite:
     """Minimal cyvcf2 extractor reading ONLY core fixed fields (skips INFO, FORMAT, genotypes)."""
     alts = tuple(v.ALT) if v.ALT else ()
@@ -310,137 +265,8 @@ def _site_record_from_cyvcf2(v: Any) -> VariantRecord:
     )
 
 
-def parse_vcf_site_only(line: str) -> Optional[VariantRecord]:
-    """Fast site-only line parser: splits only columns 0..8, completely skipping sample columns."""
-    line = line.rstrip("\r\n")
-    if not line or line.startswith("#"):
-        return None
-
-    parts = line.split("\t", 9)
-    if len(parts) < 8:
-        return None
-
-    chrom = parts[0]
-    try:
-        pos = int(parts[1])
-    except ValueError:
-        return None
-
-    var_id = parts[2]
-    ref = parts[3]
-    alt = parts[4].split(",") if parts[4] != "." else []
-    try:
-        qual = float(parts[5]) if parts[5] != "." else None
-    except ValueError:
-        qual = None
-    filter_str = parts[6]
-    info_dict = _parse_info_str(parts[7])
-    format_keys = parts[8].split(":") if len(parts) > 8 and parts[8] else ["GT"]
-
-    return VariantRecord(
-        chrom=chrom,
-        pos=pos,
-        var_id=var_id,
-        ref=ref,
-        alt=alt,
-        qual=qual,
-        filter_str=filter_str,
-        info=info_dict,
-        format_keys=format_keys,
-        sample_data={},
-        genotypes={},
-        depths={},
-        ad={},
-        samples_loaded=False,
-    )
-
-
-def parse_vcf_line(line: str, samples: List[str]) -> Optional[VariantRecord]:
-    """Parse a single raw VCF line string into a full VariantRecord."""
-    line = line.rstrip("\r\n")
-    if not line or line.startswith("#"):
-        return None
-
-    parts = line.split("\t")
-    if len(parts) < 8:
-        return None
-
-    chrom = parts[0]
-    try:
-        pos = int(parts[1])
-    except ValueError:
-        return None
-
-    var_id = parts[2]
-    ref = parts[3]
-    alt = parts[4].split(",") if parts[4] != "." else []
-    try:
-        qual = float(parts[5]) if parts[5] != "." else None
-    except ValueError:
-        qual = None
-    filter_str = parts[6]
-    info_dict = _parse_info_str(parts[7])
-    format_keys = parts[8].split(":") if len(parts) > 8 else ["GT"]
-
-    sample_data: Dict[str, Dict[str, Any]] = {}
-    genotypes: Dict[str, Tuple[int, ...]] = {}
-    depths: Dict[str, int] = {}
-    ad_dict: Dict[str, List[int]] = {}
-
-    for idx, s in enumerate(samples):
-        col_idx = 9 + idx
-        raw_val = parts[col_idx] if col_idx < len(parts) else "./."
-        sub_vals = raw_val.split(":")
-        s_map = {}
-        for fk_idx, fk in enumerate(format_keys):
-            s_map[fk] = sub_vals[fk_idx] if fk_idx < len(sub_vals) else "."
-        sample_data[s] = s_map
-
-        gt_str = s_map.get("GT", "./.")
-        gt_alleles = []
-        for a in gt_str.replace("|", "/").split("/"):
-            try:
-                gt_alleles.append(int(a))
-            except ValueError:
-                gt_alleles.append(-1)
-        genotypes[s] = tuple(gt_alleles)
-
-        try:
-            dp_val = int(s_map.get("DP", 0))
-        except ValueError:
-            dp_val = 0
-        depths[s] = dp_val
-
-        ad_raw = s_map.get("AD", "")
-        ad_list = []
-        if ad_raw and ad_raw != ".":
-            for x in ad_raw.split(","):
-                try:
-                    ad_list.append(int(x))
-                except ValueError:
-                    ad_list.append(0)
-        ad_dict[s] = ad_list
-
-    return VariantRecord(
-        chrom=chrom,
-        pos=pos,
-        var_id=var_id,
-        ref=ref,
-        alt=alt,
-        qual=qual,
-        filter_str=filter_str,
-        info=info_dict,
-        format_keys=format_keys,
-        sample_data=sample_data,
-        genotypes=genotypes,
-        depths=depths,
-        ad=ad_dict,
-        samples_loaded=True,
-    )
-
-
 def _sample_payload_from_cyvcf2(v: Any, samples: List[str]) -> Dict[str, Any]:
-    """Extract sample payload (GT, DP, AD, GQ) + lazy INFO/FORMAT from a full-sample cyvcf2 variant."""
+    """Extract sample payload (GT, DP, AD, GQ) + INFO/FORMAT from a full-sample cyvcf2 variant."""
     v_format_keys = list(v.FORMAT) if v.FORMAT else ["GT"]
     try:
         info_dict = dict(v.INFO) if v.INFO else {}
@@ -527,33 +353,34 @@ def _full_record_from_cyvcf2(v: Any, samples: List[str]) -> VariantRecord:
 
 class VcfReader:
     """
-    Dual-Handle VCF Reader:
+    Mandatory Dual-Handle cyvcf2 VCF Reader:
     - Enforces >100 MB unindexed file check before opening any handle.
     - Handle 1 (`samples=[]`): Minimal core site stream (CHROM, POS, ID, REF, ALT, QUAL, FILTER).
-    - Handle 2 (full samples): Viewport-only on-demand LRU sample hydration.
+    - Handle 2 (full samples): Viewport-only on-demand LRU sample hydration via Tabix/CSI or cyvcf2 scan.
     """
 
     def __init__(self, filepath: str, lazy: bool = True, allow_unindexed_large: bool = False):
+        if cyvcf2 is None:
+            raise RuntimeError(
+                "cyvcf2 is mandatory for VCFscape. Install cyvcf2 and retry."
+            ) from _CYVCF2_IMPORT_ERROR
+
         self.filepath = os.path.abspath(filepath)
+        if not os.path.exists(self.filepath):
+            raise FileNotFoundError(f"VCF file not found: {self.filepath}")
+
         if not allow_unindexed_large:
             check_vcf_index_requirement(self.filepath)
 
         lower = self.filepath.lower()
         self.is_gzipped = lower.endswith(".gz") or lower.endswith(".bgz")
         self.is_bcf = lower.endswith(".bcf")
-        self.has_tabix = os.path.exists(f"{self.filepath}.tbi") or os.path.exists(f"{self.filepath}.csi")
+        self.has_tabix = has_vcf_index(self.filepath)
         self.samples: List[str] = []
         self.contigs: List[str] = []
         self.header_lines: List[str] = []
+        self.backend = "cyvcf2_dual_tabix" if self.has_tabix else "cyvcf2_dual"
 
-        if HAS_CYVCF2:
-            self.backend = "cyvcf2_dual_tabix" if self.has_tabix else "cyvcf2_dual"
-        elif not (self.is_gzipped or self.is_bcf):
-            self.backend = "indexed_vcf"
-        else:
-            self.backend = "gzipped_stream"
-
-        self._sparse_index: Optional[SparseVcfIndex] = None
         self._sample_cache = RecordLruCache(maxsize=2500)
         self._site_records: List[Any] = []  # VariantRecord for initial slice, _MinimalSite for rest
         self._materialized_sites: Dict[int, VariantRecord] = {}
@@ -574,54 +401,24 @@ class VcfReader:
         self._progress_callbacks: List[Callable[[int], None]] = []
         self._hydration_callbacks: List[Callable[[List[int]], None]] = []
 
-        # 1. Fast Header Extraction (< 15ms)
+        # 1. Fast Header Extraction via cyvcf2
         self._load_header_only()
 
-        # 2. Setup Sparse Index for uncompressed plain .vcf files
-        if not self.is_gzipped and not self.is_bcf:
-            try:
-                small_file = os.path.getsize(self.filepath) <= 256 * 1024
-            except OSError:
-                small_file = False
-            use_async_idx = bool(lazy and not small_file)
-            if use_async_idx:
-                self._sparse_index = SparseVcfIndex(
-                    self.filepath,
-                    build_async=True,
-                    on_progress=self._on_sparse_progress,
-                    on_complete=self._on_sparse_complete,
-                    stop_event=self._stop_event,
-                )
-                if self._sparse_index.is_ready:
-                    self._total_variants_count = self._sparse_index.total_records
-            else:
-                self._sparse_index = SparseVcfIndex(
-                    self.filepath,
-                    build_async=False,
-                    stop_event=self._stop_event,
-                )
-                self._total_variants_count = self._sparse_index.total_records
-
-        # 3. Start Minimal Handle 1 + Viewport-Only Handle 2 (skip Handle 2 thread for tiny preloaded files)
+        # 2. Start Minimal Handle 1 + Viewport-Only Handle 2
         self._start_dual_pipelines(lazy=lazy)
 
-        # 4. Eagerly hydrate small datasets or when lazy=False
+        # 3. Eagerly hydrate small datasets or when lazy=False
         if not lazy or (self._total_variants_count is not None and self._total_variants_count <= 500):
             self._preload_all_records()
 
-    def _open_file(self):
-        if self.is_gzipped:
-            return gzip.open(self.filepath, "rt", encoding="utf-8", errors="replace")
-        return open(self.filepath, "r", encoding="utf-8", errors="replace")
-
-    def _load_header_only(self):
-        """Extracts samples, contigs, and metadata lines from the header."""
+    def _load_header_only(self) -> None:
+        """Extract samples, contigs, and header metadata lines directly via cyvcf2."""
         self.samples.clear()
         self.contigs.clear()
         self.header_lines.clear()
 
-        if self.is_bcf and HAS_CYVCF2:
-            vcf_hdr = cyvcf2.VCF(self.filepath, samples=[])
+        vcf_hdr = cyvcf2.VCF(self.filepath)
+        try:
             raw_hdr = str(vcf_hdr.raw_header or "")
             for line in raw_hdr.splitlines():
                 line = line.rstrip("\r\n")
@@ -631,40 +428,12 @@ class VcfReader:
                 if line.startswith("##contig=<ID="):
                     cid = line.split("##contig=<ID=")[1].split(",")[0].split(">")[0]
                     self.contigs.append(cid)
-            vcf_all = cyvcf2.VCF(self.filepath)
-            self.samples = list(vcf_all.samples)
-            vcf_hdr.close()
-            vcf_all.close()
-            return
-
-        with self._open_file() as f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                if not line:
-                    continue
-                if line.startswith("##"):
-                    self.header_lines.append(line)
-                    if line.startswith("##contig=<ID="):
-                        cid = line.split("##contig=<ID=")[1].split(",")[0].split(">")[0]
-                        self.contigs.append(cid)
-                    continue
-                if line.startswith("#CHROM"):
-                    self.header_lines.append(line)
-                    parts = line.split("\t")
-                    if len(parts) > 9:
-                        self.samples = parts[9:]
-                    break
-
-    def _on_sparse_progress(self, count: int) -> None:
-        if not HAS_CYVCF2 and not self._stop_event.is_set():
-            self._emit_progress(count)
-
-    def _on_sparse_complete(self, total: int) -> None:
-        if self._total_variants_count is None:
-            self._total_variants_count = total
-        if not HAS_CYVCF2 and not self._stop_event.is_set():
-            self._emit_progress(total)
-            self._emit_count_complete(total)
+            self.samples = list(vcf_hdr.samples)
+        finally:
+            try:
+                vcf_hdr.close()
+            except Exception:
+                pass
 
     def _emit_progress(self, count: int) -> None:
         if self._stop_workers or self._stop_event.is_set():
@@ -700,7 +469,7 @@ class VcfReader:
                 pass
 
     def _materialize_site(self, row_idx: int, raw_site: Any) -> VariantRecord:
-        """Convert _MinimalSite to VariantRecord on demand with tiny bounded cache."""
+        """Convert _MinimalSite to VariantRecord on demand with bounded cache."""
         if isinstance(raw_site, VariantRecord):
             return raw_site
         cached = self._materialized_sites.get(row_idx)
@@ -718,33 +487,35 @@ class VcfReader:
         Reads first 150 rows synchronously so FixedVariantTable renders immediately.
         """
         initial_batch = 150
+        site_vcf = cyvcf2.VCF(self.filepath, samples=[])
+        keep_open_for_worker = False
+        try:
+            for v in site_vcf:
+                self._site_records.append(_site_record_from_cyvcf2(v))
+                if len(self._site_records) >= initial_batch:
+                    break
 
-        if HAS_CYVCF2:
-            try:
-                site_vcf = cyvcf2.VCF(self.filepath, samples=[])
+            if len(self._site_records) < initial_batch:
+                self._site_stream_done = True
+                self._total_variants_count = len(self._site_records)
+                self._emit_progress(self._total_variants_count)
+                self._emit_count_complete(self._total_variants_count)
+            elif lazy:
+                keep_open_for_worker = True
+                self._start_cyvcf2_site_worker(site_vcf)
+            else:
                 for v in site_vcf:
-                    self._site_records.append(_site_record_from_cyvcf2(v))
-                    if len(self._site_records) >= initial_batch:
-                        break
-
-                if len(self._site_records) < initial_batch:
+                    self._site_records.append(_minimal_site_from_cyvcf2(v))
+                self._site_stream_done = True
+                self._total_variants_count = len(self._site_records)
+                self._emit_progress(self._total_variants_count)
+                self._emit_count_complete(self._total_variants_count)
+        finally:
+            if not keep_open_for_worker:
+                try:
                     site_vcf.close()
-                    self._site_stream_done = True
-                    self._total_variants_count = len(self._site_records)
-                    self._emit_progress(self._total_variants_count)
-                    self._emit_count_complete(self._total_variants_count)
-                elif lazy:
-                    self._start_cyvcf2_site_worker(site_vcf)
-                else:
-                    for v in site_vcf:
-                        self._site_records.append(_minimal_site_from_cyvcf2(v))
-                    site_vcf.close()
-                    self._site_stream_done = True
-                    self._total_variants_count = len(self._site_records)
-            except Exception:
-                self._start_fallback_site_worker(initial_batch, lazy=lazy)
-        else:
-            self._start_fallback_site_worker(initial_batch, lazy=lazy)
+                except Exception:
+                    pass
 
         small_preloaded = (
             self._total_variants_count is not None and self._total_variants_count <= 500
@@ -780,7 +551,7 @@ class VcfReader:
                     self._site_stream_done = True
                     if not self._stop_event.is_set() and not self._stop_workers:
                         self._total_variants_count = len(self._site_records)
-                if not self._stop_event.is_set() and not self._stop_workers:
+                if not self._stop_event.is_set() and not self._stop_workers and self._total_variants_count is not None:
                     self._emit_progress(self._total_variants_count)
                     self._emit_count_complete(self._total_variants_count)
             except Exception:
@@ -795,73 +566,8 @@ class VcfReader:
         self._site_thread = threading.Thread(target=_worker, daemon=True)
         self._site_thread.start()
 
-    def _start_fallback_site_worker(self, initial_batch: int, lazy: bool = True) -> None:
-        """Pure-Python fallback site-only reader."""
-        with self._open_file() as f:
-            for line in f:
-                if not line or line.startswith("#"):
-                    continue
-                rec = parse_vcf_site_only(line)
-                if rec:
-                    self._site_records.append(rec)
-                    if lazy and len(self._site_records) >= initial_batch:
-                        break
-
-        if len(self._site_records) < initial_batch or not lazy:
-            self._site_stream_done = True
-            self._total_variants_count = len(self._site_records)
-            self._emit_progress(self._total_variants_count)
-            self._emit_count_complete(self._total_variants_count)
-            return
-
-        start_idx = len(self._site_records)
-
-        def _worker():
-            try:
-                idx = 0
-                batch: List[_MinimalSite] = []
-                last_emit_t = time.monotonic()
-                with self._open_file() as f:
-                    for line in f:
-                        if self._stop_event.is_set() or self._stop_workers:
-                            break
-                        if not line or line.startswith("#"):
-                            continue
-                        if idx < start_idx:
-                            idx += 1
-                            continue
-                        site = _minimal_site_from_line(line)
-                        if site:
-                            batch.append(site)
-                            idx += 1
-                            if len(batch) >= 500:
-                                with self._site_lock:
-                                    self._site_records.extend(batch)
-                                batch.clear()
-                                now = time.monotonic()
-                                if idx % 2000 == 0 and (now - last_emit_t) >= 0.08:
-                                    last_emit_t = now
-                                    self._emit_progress(idx)
-                                time.sleep(0.0002)
-                if batch and not self._stop_event.is_set() and not self._stop_workers:
-                    with self._site_lock:
-                        self._site_records.extend(batch)
-                with self._site_lock:
-                    self._site_stream_done = True
-                    if not self._stop_event.is_set() and not self._stop_workers:
-                        self._total_variants_count = len(self._site_records)
-                if not self._stop_event.is_set() and not self._stop_workers:
-                    self._emit_progress(self._total_variants_count)
-                    self._emit_count_complete(self._total_variants_count)
-            except Exception:
-                with self._site_lock:
-                    self._site_stream_done = True
-
-        self._site_thread = threading.Thread(target=_worker, daemon=True)
-        self._site_thread.start()
-
     def _hydrate_window_sync(self, start_idx: int, count: int) -> List[int]:
-        """Hydrate sample payloads for [start_idx, start_idx + count) using Tabix / SparseIndex / scan."""
+        """Hydrate sample payloads for [start_idx, start_idx + count) via cyvcf2 Handle 2."""
         if not self.samples or count <= 0 or self._stop_event.is_set() or self._stop_workers:
             return []
 
@@ -875,7 +581,7 @@ class VcfReader:
         hydrated: List[int] = []
 
         # Fast path 1: Tabix / CSI region query via cyvcf2 Handle 2
-        if HAS_CYVCF2 and self.has_tabix and target_sites:
+        if self.has_tabix and target_sites:
             tabix_vcf = None
             try:
                 tabix_vcf = cyvcf2.VCF(self.filepath)
@@ -914,95 +620,34 @@ class VcfReader:
                     except Exception:
                         pass
 
-        # Fast path 2: Sparse byte-offset index for plain uncompressed .vcf
-        if self._sparse_index and target_sites and not self._stop_event.is_set():
-            remaining = [i for i in missing if not self._sample_cache.contains(i)]
-            if remaining:
-                first_i = remaining[0]
-                last_i = remaining[-1]
-                seek_offset, curr_idx = self._sparse_index.get_seek_offset_for_index(first_i)
-                needed_set = set(remaining)
-                with open(self.filepath, "r", encoding="utf-8", errors="replace") as f:
-                    f.seek(seek_offset)
-                    while curr_idx <= last_i and not self._stop_event.is_set():
-                        line = f.readline()
-                        if not line:
-                            break
-                        if line.startswith("#"):
-                            continue
-                        if curr_idx in needed_set:
-                            full_rec = parse_vcf_line(line, self.samples)
-                            if full_rec:
-                                payload = {
-                                    "info": full_rec.info,
-                                    "format_keys": full_rec.format_keys,
-                                    "sample_data": full_rec.sample_data,
-                                    "genotypes": full_rec.genotypes,
-                                    "depths": full_rec.depths,
-                                    "ad": full_rec.ad,
-                                }
-                                self._sample_cache.put(curr_idx, payload)
-                                hydrated.append(curr_idx)
-                        curr_idx += 1
-                return hydrated
-
-        # Fallback path 3: cyvcf2 sequential scan or text scan up to last needed index
+        # Fast path 2: Bounded sequential cyvcf2 scan up to last missing index
         remaining = [i for i in missing if not self._sample_cache.contains(i)]
-        if remaining and not self._stop_event.is_set():
+        if remaining and not self._stop_event.is_set() and not self._stop_workers:
             last_i = remaining[-1]
             needed_set = set(remaining)
-            if HAS_CYVCF2:
-                vcf2 = None
-                try:
-                    vcf2 = cyvcf2.VCF(self.filepath)
-                    for idx, v in enumerate(vcf2):
-                        if idx > last_i or self._stop_event.is_set() or self._stop_workers:
-                            break
-                        if idx in needed_set:
-                            payload = _sample_payload_from_cyvcf2(v, self.samples)
-                            self._sample_cache.put(idx, payload)
-                            hydrated.append(idx)
-                    return hydrated
-                except Exception:
-                    pass
-                finally:
-                    if vcf2 is not None:
-                        try:
-                            vcf2.close()
-                        except Exception:
-                            pass
-
-            curr_idx = 0
-            with self._open_file() as f:
-                for line in f:
-                    if self._stop_event.is_set():
+            vcf2 = None
+            try:
+                vcf2 = cyvcf2.VCF(self.filepath)
+                for idx, v in enumerate(vcf2):
+                    if idx > last_i or self._stop_event.is_set() or self._stop_workers:
                         break
-                    if not line or line.startswith("#"):
-                        continue
-                    if curr_idx > last_i:
-                        break
-                    if curr_idx in needed_set:
-                        full_rec = parse_vcf_line(line, self.samples)
-                        if full_rec:
-                            payload = {
-                                "info": full_rec.info,
-                                "format_keys": full_rec.format_keys,
-                                "sample_data": full_rec.sample_data,
-                                "genotypes": full_rec.genotypes,
-                                "depths": full_rec.depths,
-                                "ad": full_rec.ad,
-                            }
-                            self._sample_cache.put(curr_idx, payload)
-                            hydrated.append(curr_idx)
-                    curr_idx += 1
+                    if idx in needed_set:
+                        payload = _sample_payload_from_cyvcf2(v, self.samples)
+                        self._sample_cache.put(idx, payload)
+                        hydrated.append(idx)
+            except Exception:
+                pass
+            finally:
+                if vcf2 is not None:
+                    try:
+                        vcf2.close()
+                    except Exception:
+                        pass
 
         return hydrated
 
     def _start_sample_hydration_worker(self) -> None:
-        """
-        Viewport-only Handle 2 background worker:
-        Coalesces viewport hydration requests and sleeps when idle so the UI stays responsive.
-        """
+        """Viewport-only Handle 2 background worker coalescing scroll hydration requests."""
         def _worker():
             while not self._stop_event.is_set() and not self._stop_workers:
                 req: Optional[Tuple[int, int]] = None
@@ -1024,7 +669,7 @@ class VcfReader:
                         hydrated = self._hydrate_window_sync(p_start, p_count)
                     except (FileNotFoundError, OSError):
                         break
-                    if hydrated and not self._stop_event.is_set():
+                    if hydrated and not self._stop_event.is_set() and not self._stop_workers:
                         self._emit_hydration(hydrated)
 
         self._sample_thread = threading.Thread(target=_worker, daemon=True)
@@ -1032,20 +677,20 @@ class VcfReader:
 
     def request_sample_hydration(self, offset: int, limit: int = 100) -> None:
         """Schedule viewport-scoped sample hydration, coalescing superseded scroll requests."""
-        if not self.samples or limit <= 0 or self._stop_event.is_set():
+        if not self.samples or limit <= 0 or self._stop_event.is_set() or self._stop_workers:
             return
         with self._sample_cond:
             self._priority_window = (max(0, offset), limit)
             self._sample_cond.notify_all()
 
     def set_focus_row(self, row_idx: int) -> None:
-        """Track active cursor row and ensure nearby viewport rows are queued for hydration."""
+        """Track active cursor row."""
         self._focus_row = max(0, row_idx)
 
     def add_hydration_callback(self, cb: Callable[[List[int]], None]) -> None:
         self._hydration_callbacks.append(cb)
 
-    def add_progress_callback(self, cb: Callable[[int], None]):
+    def add_progress_callback(self, cb: Callable[[int], None]) -> None:
         self._progress_callbacks.append(cb)
         if self._total_variants_count is not None:
             try:
@@ -1053,7 +698,7 @@ class VcfReader:
             except Exception:
                 pass
 
-    def add_total_variants_callback(self, cb: Callable[[int], None]):
+    def add_total_variants_callback(self, cb: Callable[[int], None]) -> None:
         if self._total_variants_count is not None:
             try:
                 cb(self._total_variants_count)
@@ -1070,13 +715,13 @@ class VcfReader:
         return self._total_variants_count
 
     def _wait_for_site_index(self, target_count: int) -> None:
-        while not self._site_stream_done and not self._stop_event.is_set():
+        while not self._site_stream_done and not self._stop_event.is_set() and not self._stop_workers:
             with self._site_lock:
                 if len(self._site_records) >= target_count:
                     return
             time.sleep(0.002)
 
-    def _preload_all_records(self):
+    def _preload_all_records(self) -> None:
         if self._records:
             return
         self._records = self.get_records(0, None)
@@ -1093,11 +738,6 @@ class VcfReader:
         if self._site_thread and self._site_thread.is_alive():
             self._site_thread.join()
         if self._total_variants_count is not None:
-            return self._total_variants_count
-        if self._sparse_index:
-            if not self._sparse_index.is_ready and not (self._stop_event.is_set() or self._stop_workers):
-                self._sparse_index.wait_until_ready()
-            self._total_variants_count = self._sparse_index.total_records
             return self._total_variants_count
         with self._site_lock:
             return len(self._site_records)
@@ -1127,9 +767,7 @@ class VcfReader:
         limit: int = 100,
         allow_placeholder: bool = False,
     ) -> List[VariantRecord]:
-        """
-        Windowed variant slice retrieval combining Handle 1 site store + viewport LRU cache.
-        """
+        """Windowed variant slice retrieval combining Handle 1 site store + viewport LRU cache."""
         if offset < 0:
             offset = 0
 
@@ -1178,50 +816,31 @@ class VcfReader:
         return result
 
     def get_records(self, offset: int = 0, limit: Optional[int] = None) -> List[VariantRecord]:
-        """Backward-compatible get_records method."""
+        """Retrieve variant records (windowed if limit is given, else full file via cyvcf2)."""
         if limit is not None:
             return self.get_slice(offset, limit, allow_placeholder=False)
 
         if not self._records:
             all_records: List[VariantRecord] = []
-            if HAS_CYVCF2:
+            vcf = cyvcf2.VCF(self.filepath)
+            try:
+                for idx, v in enumerate(vcf):
+                    rec = _full_record_from_cyvcf2(v, self.samples)
+                    all_records.append(rec)
+                    if self.samples:
+                        self._sample_cache.put(idx, {
+                            "info": rec.info,
+                            "format_keys": rec.format_keys,
+                            "sample_data": rec.sample_data,
+                            "genotypes": rec.genotypes,
+                            "depths": rec.depths,
+                            "ad": rec.ad,
+                        })
+            finally:
                 try:
-                    vcf = cyvcf2.VCF(self.filepath)
-                    for idx, v in enumerate(vcf):
-                        rec = _full_record_from_cyvcf2(v, self.samples)
-                        all_records.append(rec)
-                        if self.samples:
-                            self._sample_cache.put(idx, {
-                                "info": rec.info,
-                                "format_keys": rec.format_keys,
-                                "sample_data": rec.sample_data,
-                                "genotypes": rec.genotypes,
-                                "depths": rec.depths,
-                                "ad": rec.ad,
-                            })
                     vcf.close()
                 except Exception:
-                    all_records = []
-
-            if not all_records:
-                curr_idx = 0
-                with self._open_file() as f:
-                    for line in f:
-                        if not line or line.startswith("#"):
-                            continue
-                        rec = parse_vcf_line(line, self.samples)
-                        if rec:
-                            all_records.append(rec)
-                            if self.samples:
-                                self._sample_cache.put(curr_idx, {
-                                    "info": rec.info,
-                                    "format_keys": rec.format_keys,
-                                    "sample_data": rec.sample_data,
-                                    "genotypes": rec.genotypes,
-                                    "depths": rec.depths,
-                                    "ad": rec.ad,
-                                })
-                            curr_idx += 1
+                    pass
 
             self._records = all_records
             self._total_variants_count = len(self._records)
@@ -1229,67 +848,43 @@ class VcfReader:
         return self._records[offset:]
 
     def query_region(self, chrom: str, start: int, end: int, limit: int = 500) -> List[VariantRecord]:
-        """Query variants in a genomic interval chrom:start-end."""
-        if HAS_CYVCF2 and self.has_tabix:
+        """Query variants in a genomic interval chrom:start-end via cyvcf2."""
+        if self.has_tabix:
+            vcf = cyvcf2.VCF(self.filepath)
+            records: List[VariantRecord] = []
             try:
-                vcf = cyvcf2.VCF(self.filepath)
-                region_str = f"{chrom}:{start}-{end}"
-                records: List[VariantRecord] = []
-                for v in vcf(region_str):
+                for v in vcf(f"{chrom}:{start}-{end}"):
                     records.append(_full_record_from_cyvcf2(v, self.samples))
                     if len(records) >= limit:
                         break
-                vcf.close()
                 return records
             except Exception:
                 pass
-
-        if self._sparse_index:
-            seek_offset, _ = self._sparse_index.find_nearest_checkpoint_for_region(chrom, start)
-            records = []
-            with open(self.filepath, "r", encoding="utf-8", errors="replace") as f:
-                f.seek(seek_offset)
-                while len(records) < limit:
-                    line = f.readline()
-                    if not line:
-                        break
-                    if line.startswith("#"):
-                        continue
-                    parts = line.split("\t", 3)
-                    if len(parts) >= 2:
-                        c = parts[0]
-                        try:
-                            p = int(parts[1])
-                        except ValueError:
-                            continue
-                        if c == chrom:
-                            if p > end:
-                                break
-                            if p >= start:
-                                rec = parse_vcf_line(line, self.samples)
-                                if rec:
-                                    records.append(rec)
-                        elif records:
-                            break
-            return records
+            finally:
+                try:
+                    vcf.close()
+                except Exception:
+                    pass
 
         records = []
-        with self._open_file() as f:
-            for line in f:
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t", 3)
-                if len(parts) >= 2 and parts[0] == chrom:
-                    try:
-                        p = int(parts[1])
-                    except ValueError:
-                        continue
-                    if start <= p <= end:
-                        rec = parse_vcf_line(line, self.samples)
-                        if rec:
-                            records.append(rec)
-                            if len(records) >= limit:
-                                break
+        vcf = cyvcf2.VCF(self.filepath)
+        try:
+            for v in vcf:
+                if v.CHROM == chrom:
+                    pos = int(v.POS)
+                    if pos > end and records:
+                        break
+                    if start <= pos <= end:
+                        records.append(_full_record_from_cyvcf2(v, self.samples))
+                        if len(records) >= limit:
+                            break
+                elif records:
+                    break
+        finally:
+            try:
+                vcf.close()
+            except Exception:
+                pass
         return records
 
     def filter_records(
@@ -1354,7 +949,7 @@ class VcfReader:
 
         matched_indices: List[int] = []
         idx = 0
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self._stop_workers:
             with self._site_lock:
                 avail = len(self._site_records)
                 done = self._site_stream_done
@@ -1398,19 +993,13 @@ class VcfReader:
         self._progress_callbacks.clear()
         self._count_callbacks.clear()
         self._hydration_callbacks.clear()
-        if self._sparse_index is not None:
-            self._sparse_index.stop()
         with self._sample_cond:
             self._priority_window = None
             self._sample_cond.notify_all()
         if not wait:
             return
         cur = threading.current_thread()
-        for t in (
-            self._sample_thread,
-            self._site_thread,
-            getattr(self._sparse_index, "_worker_thread", None) if self._sparse_index is not None else None,
-        ):
+        for t in (self._sample_thread, self._site_thread):
             if t is not None and t is not cur and t.is_alive():
                 try:
                     t.join(timeout=timeout)

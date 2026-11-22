@@ -2,9 +2,9 @@
 Dual Buffered PyArrow Backends for FastDataTable:
 1. FixedArrowBuffer: Columnar PyArrow buffer fed by Handle 1 (cyvcf2 samples=[]) for
    FixedVariantTable, supporting zero-copy view-mode column projections.
-2. SampleArrowBuffer: Columnar PyArrow buffer fed by Handle 2 (full-sample LRU hydrator)
-   for SampleMatrixTable, supporting "..." unhydrated placeholders, batched row hydration,
-   and O(1) switching across GT / DP / AD / GQ FORMAT tags.
+2. SampleArrowBuffer: Lightweight single-tag PyArrow buffer fed by Handle 2 (full-sample
+   LRU hydrator) for SampleMatrixTable, supporting "..." unhydrated placeholders,
+   in-place row hydration without backend swaps, and lazy switching across GT / DP / AD / GQ.
 """
 
 from __future__ import annotations
@@ -172,9 +172,10 @@ class FixedArrowBuffer:
 
 class SampleArrowBuffer:
     """
-    Buffered PyArrow tables for SampleMatrixTable (Handle 2 viewport sample hydrator).
-    Maintains columnar arrays per FORMAT tag (GT, DP, AD, GQ) across all cohort samples
-    natively for FastDataTable, representing unhydrated rows with "..." placeholders.
+    Lightweight single-active-tag PyArrow buffer for SampleMatrixTable.
+    Tracks loaded records and hydrated row indices without eagerly duplicating
+    4 FORMAT tag column sets across every sample, and provides direct O(1) cell/row
+    accessors for in-place StyledArrowBackend rendering during hydration.
     """
 
     def __init__(
@@ -185,14 +186,10 @@ class SampleArrowBuffer:
     ):
         resolved = samples if samples is not None else visible_samples
         self.visible_samples: List[str] = list(resolved or [])
-        self._row_count: int = 0
+        self._records: List[VariantRecord] = []
         self._hydrated_rows: set[int] = set()
-        self._tag_columns: Dict[str, Dict[str, List[str]]] = {
-            tag: {s: [] for s in self.visible_samples}
-            for tag in SAMPLE_FORMAT_TAGS
-        }
-        self._tables: Dict[str, Optional[Any]] = {tag: None for tag in SAMPLE_FORMAT_TAGS}
-        self._dirty_tags: set[str] = set(SAMPLE_FORMAT_TAGS)
+        self._cached_tag: Optional[str] = None
+        self._cached_table: Optional[Any] = None
         if records:
             self.append_records(records)
 
@@ -202,19 +199,34 @@ class SampleArrowBuffer:
 
     @property
     def row_count(self) -> int:
-        return self._row_count
+        return len(self._records)
 
     def is_row_hydrated(self, row_idx: int) -> bool:
         return row_idx in self._hydrated_rows
 
-    def _extract_row_sample_values(self, rec: VariantRecord, tag: str) -> List[str]:
+    def get_cell_value(self, row_idx: int, col_idx: int, format_tag: str = "GT") -> str:
+        if not self.visible_samples:
+            return "-"
+        if not (0 <= row_idx < len(self._records)) or not (0 <= col_idx < len(self.visible_samples)):
+            return "."
+        rec = self._records[row_idx]
+        if not getattr(rec, "samples_loaded", True):
+            return "..."
+        tag_key = format_tag.upper() if format_tag.upper() in SAMPLE_FORMAT_TAGS else "GT"
+        sample_id = self.visible_samples[col_idx]
+        return str(rec.sample_data.get(sample_id, {}).get(tag_key, "."))
+
+    def get_row_values(self, row_idx: int, format_tag: str = "GT") -> List[str]:
+        if not self.visible_samples:
+            return ["-"]
+        if not (0 <= row_idx < len(self._records)):
+            return ["." for _ in self.visible_samples]
+        rec = self._records[row_idx]
         if not getattr(rec, "samples_loaded", True):
             return ["..." for _ in self.visible_samples]
-        row_vals: List[str] = []
+        tag_key = format_tag.upper() if format_tag.upper() in SAMPLE_FORMAT_TAGS else "GT"
         sdata = rec.sample_data
-        for s in self.visible_samples:
-            row_vals.append(str(sdata.get(s, {}).get(tag, ".")))
-        return row_vals
+        return [str(sdata.get(s, {}).get(tag_key, ".")) for s in self.visible_samples]
 
     def reset(
         self,
@@ -225,78 +237,69 @@ class SampleArrowBuffer:
         resolved = samples if samples is not None else visible_samples
         if resolved is not None:
             self.visible_samples = list(resolved)
-        self._row_count = 0
+        self._records = []
         self._hydrated_rows.clear()
-        self._tag_columns = {
-            tag: {s: [] for s in self.visible_samples}
-            for tag in SAMPLE_FORMAT_TAGS
-        }
-        self._tables = {tag: None for tag in SAMPLE_FORMAT_TAGS}
-        self._dirty_tags = set(SAMPLE_FORMAT_TAGS)
+        self._cached_tag = None
+        self._cached_table = None
         if records:
             self.append_records(records)
 
     def set_visible_samples(self, visible_samples: List[str], records: List[VariantRecord]) -> None:
-        """Rebuild columnar window when horizontal cohort window shifts."""
         self.reset(records, visible_samples=visible_samples)
 
     def append_records(self, records: List[VariantRecord]) -> None:
         if not records:
             return
-        for rec in records:
-            for tag in SAMPLE_FORMAT_TAGS:
-                vals = self._extract_row_sample_values(rec, tag)
-                tag_cols = self._tag_columns[tag]
-                for idx, s in enumerate(self.visible_samples):
-                    tag_cols[s].append(vals[idx])
+        start_idx = len(self._records)
+        self._records.extend(records)
+        for offset, rec in enumerate(records):
             if getattr(rec, "samples_loaded", True):
-                self._hydrated_rows.add(self._row_count)
-            self._row_count += 1
-        self._dirty_tags.update(SAMPLE_FORMAT_TAGS)
+                self._hydrated_rows.add(start_idx + offset)
+        self._cached_tag = None
+        self._cached_table = None
 
     def hydrate_rows(self, row_indices: List[int], records_by_idx: Dict[int, VariantRecord]) -> bool:
-        """Patch newly hydrated sample rows cleanly across all FORMAT tag columns."""
+        """Record newly hydrated VariantRecords in place without rebuilding full multi-tag tables."""
         updated = False
         for row_idx in row_indices:
-            if not (0 <= row_idx < self._row_count) or row_idx in self._hydrated_rows:
+            if not (0 <= row_idx < len(self._records)) or row_idx in self._hydrated_rows:
                 continue
             rec = records_by_idx.get(row_idx)
             if rec is None or not getattr(rec, "samples_loaded", False):
                 continue
-            for tag in SAMPLE_FORMAT_TAGS:
-                vals = self._extract_row_sample_values(rec, tag)
-                tag_cols = self._tag_columns[tag]
-                for col_idx, s in enumerate(self.visible_samples):
-                    tag_cols[s][row_idx] = vals[col_idx]
+            self._records[row_idx] = rec
             self._hydrated_rows.add(row_idx)
             updated = True
         if updated:
-            self._dirty_tags.update(SAMPLE_FORMAT_TAGS)
+            # Invalidate cached Arrow table lazily; live StyledArrowBackend reads updated rows immediately.
+            self._cached_table = None
         return updated
-
-    def _build_arrow_table_for_tag(self, tag: str) -> Optional[Any]:
-        if not HAS_PYARROW:
-            return None
-        tag_key = tag.upper() if tag.upper() in SAMPLE_FORMAT_TAGS else "GT"
-        if not self.visible_samples:
-            self._tables[tag_key] = pa.table(
-                {"Samples": pa.array(["-"] * self._row_count, type=pa.string())}
-            )
-            self._dirty_tags.discard(tag_key)
-            return self._tables[tag_key]
-        cols = self._tag_columns[tag_key]
-        arrays = {s: pa.array(cols[s], type=pa.string()) for s in self.visible_samples}
-        self._tables[tag_key] = pa.table(arrays)
-        self._dirty_tags.discard(tag_key)
-        return self._tables[tag_key]
 
     def get_arrow_table(self, format_tag: str = "GT") -> Optional[Any]:
         if not HAS_PYARROW:
             return None
         tag_key = format_tag.upper() if format_tag.upper() in SAMPLE_FORMAT_TAGS else "GT"
-        if tag_key in self._dirty_tags or self._tables.get(tag_key) is None:
-            return self._build_arrow_table_for_tag(tag_key)
-        return self._tables[tag_key]
+        if self._cached_table is not None and self._cached_tag == tag_key:
+            return self._cached_table
+
+        row_count = len(self._records)
+        if not self.visible_samples:
+            self._cached_table = pa.table(
+                {"Samples": pa.array(["-"] * row_count, type=pa.string())}
+            )
+            self._cached_tag = tag_key
+            return self._cached_table
+
+        col_lists: Dict[str, List[str]] = {s: [] for s in self.visible_samples}
+        for row_idx in range(row_count):
+            vals = self.get_row_values(row_idx, tag_key)
+            for col_idx, s in enumerate(self.visible_samples):
+                col_lists[s].append(vals[col_idx])
+
+        arrays = {s: pa.array(col_lists[s], type=pa.string()) for s in self.visible_samples}
+        self._cached_table = pa.table(arrays)
+        self._cached_tag = tag_key
+        return self._cached_table
 
     def create_backend(self, format_tag: str = "GT") -> Optional[Any]:
         if not (HAS_PYARROW and HAS_FASTDATATABLE):

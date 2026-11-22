@@ -9,11 +9,10 @@ import threading
 from typing import Optional, List, Set
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Horizontal
 from textual.binding import Binding
-from textual.screen import Screen
 
-from vcfscape.core.vcf_reader import VcfReader, VariantRecord
+from vcfscape.core.vcf_reader import VcfReader
 from vcfscape.core.cohorts import CohortManager
 from vcfscape.ui.widgets.header_bar import HeaderBar
 from vcfscape.ui.widgets.variant_table import VariantSplitView
@@ -22,45 +21,6 @@ from vcfscape.ui.widgets.cohort_stats_pane import CohortStatsPane
 from vcfscape.ui.widgets.footer_bar import FooterBar
 from vcfscape.ui.screens.cohort_manager_screen import CohortManagerScreen
 from vcfscape.ui.screens.jump_region_screen import JumpRegionScreen
-from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen
-
-
-class MainScreen(Screen):
-    """Explicit root workspace screen always anchored at the base of screen_stack."""
-
-    BINDINGS = [
-        Binding("q", "app.quit", "Quit", show=False),
-        Binding("ctrl+c", "app.quit", "Quit", show=False, priority=True),
-        Binding("ctrl+z", "app.suspend_process", "Suspend", show=False, priority=True),
-    ]
-
-    def __init__(self, app_ref: "VcfscapeApp", **kwargs):
-        super().__init__(**kwargs)
-        self._app_ref = app_ref
-
-    def compose(self) -> ComposeResult:
-        yield self._app_ref.header_bar
-        with Horizontal(id="main_container"):
-            yield self._app_ref.table_widget
-            yield self._app_ref.sidebar_panel
-        yield self._app_ref.stats_pane
-        yield self._app_ref.footer_bar
-
-    def on_mount(self) -> None:
-        self._app_ref._on_main_screen_mounted()
-
-    def on_screen_resume(self) -> None:
-        """Restore focus and layout whenever a modal screen dismisses back to MainScreen."""
-        if getattr(self._app_ref, "_vcfscape_closing", False):
-            return
-        try:
-            self._app_ref.table_widget.focus()
-        except Exception:
-            pass
-        try:
-            self.refresh(layout=True)
-        except Exception:
-            pass
 
 
 class VcfscapeApp(App):
@@ -99,15 +59,12 @@ class VcfscapeApp(App):
         self.reader = VcfReader(vcf_path, lazy=True)
         self.cohort_manager = CohortManager(self.reader.samples)
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
-        self.loading_screen: Optional[VcfLoadingScreen] = None
         self._vcfscape_closing = False
-        self._main_screen: Optional[MainScreen] = None
         self._callbacks_hooked = False
         self._pending_hydrated_indices: Set[int] = set()
         self._hydration_timer: Optional[object] = None
         self._ui_loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # Widgets
         provisional_variants = self.reader.get_total_variants_async()
         self.header_bar = HeaderBar(
             filename=os.path.basename(vcf_path),
@@ -116,7 +73,6 @@ class VcfscapeApp(App):
         )
         self.header_bar.backend = self.reader.backend
 
-        # True split with virtual buffer: left fixed columns + right scrollable samples
         try:
             initial_slice = self.reader.get_slice(0, 150, allow_placeholder=True)
         except TypeError:
@@ -131,11 +87,13 @@ class VcfscapeApp(App):
         self.stats_pane = CohortStatsPane(self.cohort_manager)
         self.footer_bar = FooterBar()
 
-    def get_default_screen(self) -> Screen:
-        """Install explicit MainScreen as the permanent base of screen_stack."""
-        if self._main_screen is None:
-            self._main_screen = MainScreen(self, id="_default")
-        return self._main_screen
+    def compose(self) -> ComposeResult:
+        yield self.header_bar
+        with Horizontal(id="main_container"):
+            yield self.table_widget
+            yield self.sidebar_panel
+        yield self.stats_pane
+        yield self.footer_bar
 
     def _hook_reader_callbacks(self) -> None:
         if self._callbacks_hooked:
@@ -147,19 +105,18 @@ class VcfscapeApp(App):
             self.reader.add_progress_callback(self._on_progress_update)
             self.reader.add_total_variants_callback(self._on_total_variants_ready)
 
-    def _on_main_screen_mounted(self) -> None:
-        """Called after MainScreen and all child widgets have mounted."""
+    def on_mount(self) -> None:
         try:
             self._ui_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._ui_loop = None
+
         self._hook_reader_callbacks()
         try:
             self.table_widget.focus()
         except Exception:
             pass
 
-        # Reconcile only rows not yet hydrated in SampleArrowBuffer
         if hasattr(self.table_widget, "hydrate_rows") and self.table_widget.records:
             buf = getattr(self.table_widget, "sample_buffer", None)
             if buf is not None and hasattr(buf, "is_row_hydrated"):
@@ -172,43 +129,13 @@ class VcfscapeApp(App):
             if pending:
                 self.table_widget.hydrate_rows(pending)
 
-        if not self.reader.total_variants_ready:
-            def _push_loading_modal() -> None:
-                if self._vcfscape_closing:
-                    return
-                if self.reader.total_variants_ready:
-                    total = self.reader.get_total_variants_async()
-                    if total is not None:
-                        self._apply_total_variants(total)
-                    return
-
-                def _on_loading_dismiss(_result=None):
-                    self.loading_screen = None
-                    if self._vcfscape_closing:
-                        return
-                    try:
-                        self.table_widget.focus()
-                    except Exception:
-                        pass
-                    if self._main_screen is not None:
-                        try:
-                            self._main_screen.refresh(layout=True)
-                        except Exception:
-                            pass
-
-                self.loading_screen = VcfLoadingScreen(os.path.basename(self.vcf_path))
-                self.push_screen(self.loading_screen, _on_loading_dismiss)
-
-                # Re-check in case worker completed right as modal was pushed
-                if self.reader.total_variants_ready:
-                    total = self.reader.get_total_variants_async()
-                    if total is not None:
-                        self._apply_total_variants(total)
-
-            try:
-                self.call_after_refresh(_push_loading_modal)
-            except Exception:
-                _push_loading_modal()
+        if self.reader.total_variants_ready:
+            total = self.reader.get_total_variants_async()
+            if total is not None:
+                self.header_bar.total_variants = total
+                self.table_widget.update_total_variants(total)
+        else:
+            self.footer_bar.set_log("Indexing variants in background...")
 
     def _stop_hydration_timer(self) -> None:
         if self._hydration_timer is not None:
@@ -227,16 +154,6 @@ class VcfscapeApp(App):
                 self.table_widget.stop_timers()
             except Exception:
                 pass
-        if self.loading_screen is not None:
-            modal = self.loading_screen
-            self.loading_screen = None
-            if hasattr(modal, "_dismiss_requested"):
-                modal._dismiss_requested = True
-            if hasattr(modal, "_stop_spinner"):
-                try:
-                    modal._stop_spinner()
-                except Exception:
-                    pass
         if hasattr(self.reader, "close"):
             try:
                 self.reader.close(wait=False)
@@ -247,18 +164,12 @@ class VcfscapeApp(App):
                     pass
             except Exception:
                 pass
-        workers = getattr(self, "workers", None)
-        if workers is not None and hasattr(workers, "cancel_all"):
-            try:
-                workers.cancel_all()
-            except Exception:
-                pass
 
     def on_unmount(self) -> None:
         self._begin_shutdown()
 
     def on_key(self, event: events.Key) -> None:
-        if event.key == "ctrl+c":
+        if event.key in ("ctrl+c", "q"):
             event.stop()
             event.prevent_default()
             self._begin_shutdown()
@@ -311,8 +222,6 @@ class VcfscapeApp(App):
                 loop = self._ui_loop or getattr(self, "_loop", None)
                 if loop is not None and loop.is_running() and not loop.is_closed():
                     loop.call_soon_threadsafe(_guarded_call)
-                else:
-                    self.call_from_thread(_guarded_call)
         except Exception:
             pass
 
@@ -344,25 +253,18 @@ class VcfscapeApp(App):
     def _apply_progress_update(self, count: int) -> None:
         if self._vcfscape_closing:
             return
-        if self.loading_screen is not None:
-            self.loading_screen.update_progress(count)
+        self.header_bar.counting_progress = count
+        self.footer_bar.set_log(f"Indexing variants in background: {count:,} sites...")
 
-    def _on_total_variants_ready(self, total: int):
+    def _on_total_variants_ready(self, total: int) -> None:
         self._invoke_on_ui(self._apply_total_variants, total)
 
-    def _apply_total_variants(self, total: int):
+    def _apply_total_variants(self, total: int) -> None:
         if self._vcfscape_closing:
             return
+        self.header_bar.counting_progress = total
         self.header_bar.total_variants = total
         self.table_widget.update_total_variants(total)
-        if self.loading_screen is not None:
-            modal = self.loading_screen
-            self.loading_screen = None
-            modal.mark_complete(total)
-        try:
-            self.table_widget.focus()
-        except Exception:
-            pass
         self.footer_bar.set_log(f"VCF file indexing complete: {total:,} total variants.")
 
     def on_variant_split_view_variant_selected(self, message: VariantSplitView.VariantSelected):
@@ -371,7 +273,7 @@ class VcfscapeApp(App):
             return
         rec = message.record
         sample_id = message.sample_id
-        
+
         self.sidebar_panel.update_selection(rec, sample_id)
         if not self.stats_pane.is_collapsed:
             self.stats_pane.update_stats(rec)

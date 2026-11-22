@@ -10,9 +10,4 @@ try:
 except ImportError:
     JumpRegionScreen = None
 
-try:
-    from vcfscape.ui.screens.vcf_loading_screen import VcfLoadingScreen
-except ImportError:
-    VcfLoadingScreen = None
-
-__all__ = ["CohortManagerScreen", "JumpRegionScreen", "VcfLoadingScreen"]
+__all__ = ["CohortManagerScreen", "JumpRegionScreen"]
