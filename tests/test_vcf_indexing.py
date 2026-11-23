@@ -80,6 +80,13 @@ class TestVcfIndexing(unittest.TestCase):
         self.assertEqual(cache.get(3), "three")
         self.assertEqual(cache.get(4), "four")
 
+        unbounded = RecordLruCache(maxsize=None)
+        for i in range(10):
+            unbounded.put(i, f"v_{i}")
+        self.assertEqual(len(unbounded), 10)
+        for i in range(10):
+            self.assertEqual(unbounded.get(i), f"v_{i}")
+
     def test_large_unindexed_vcf_guard_does_not_open_file(self):
         """Files larger than threshold without a .tbi/.csi index must fail before opening."""
         gz_path = os.path.join(self.temp_dir.name, "large_guard_test.vcf.gz")
@@ -237,6 +244,21 @@ class TestVcfIndexing(unittest.TestCase):
             self.assertIsNotNone(hydrated)
             self.assertTrue(hydrated.samples_loaded)
             self.assertEqual(len(hydrated.sample_data), 20)
+        finally:
+            reader.close()
+
+    @unittest.skipUnless(CYVCF2_AVAILABLE, "cyvcf2 not installed in this environment")
+    def test_unindexed_single_pass_hydrates_all_without_eviction(self):
+        """Allowed unindexed VCFs (< 100 MB) run one Handle 2 pass caching all rows without eviction."""
+        reader = VcfReader(self.vcf_path, lazy=True)
+        try:
+            deadline = time.time() + 5.0
+            while not reader._unindexed_pass_done and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(reader._unindexed_pass_done)
+            self.assertEqual(len(reader._sample_cache), 2500)
+            self.assertTrue(reader.get_hydrated_record(0).samples_loaded)
+            self.assertTrue(reader.get_hydrated_record(2499).samples_loaded)
         finally:
             reader.close()
 

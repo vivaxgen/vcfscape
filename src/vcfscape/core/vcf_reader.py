@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import time
 import threading
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import List, Dict, Any, Optional, Tuple, Callable, Sequence, Set
 
 from vcfscape.core.malaria_db import MalariaAnnotationDB, MarkerAnnotation
 from vcfscape.core.indexer import RecordLruCache
@@ -381,7 +381,7 @@ class VcfReader:
         self.header_lines: List[str] = []
         self.backend = "cyvcf2_dual_tabix" if self.has_tabix else "cyvcf2_dual"
 
-        self._sample_cache = RecordLruCache(maxsize=2500)
+        self._sample_cache = RecordLruCache(maxsize=2500 if self.has_tabix else None)
         self._site_records: List[Any] = []  # VariantRecord for initial slice, _MinimalSite for rest
         self._materialized_sites: Dict[int, VariantRecord] = {}
         self._site_lock = threading.RLock()
@@ -392,7 +392,10 @@ class VcfReader:
         self._site_thread: Optional[threading.Thread] = None
         self._sample_thread: Optional[threading.Thread] = None
         self._sample_cond = threading.Condition()
-        self._priority_window: Optional[Tuple[int, int]] = None
+        self._pending_indices: Optional[List[int]] = None
+        self._priority_indices: Set[int] = set()
+        self._priority_version: int = 0
+        self._unindexed_pass_done = False
         self._focus_row: int = 0
         self._stop_event = threading.Event()
         self._stop_workers = False
@@ -566,38 +569,62 @@ class VcfReader:
         self._site_thread = threading.Thread(target=_worker, daemon=True)
         self._site_thread.start()
 
-    def _hydrate_window_sync(self, start_idx: int, count: int) -> List[int]:
-        """Hydrate sample payloads for [start_idx, start_idx + count) via cyvcf2 Handle 2."""
-        if not self.samples or count <= 0 or self._stop_event.is_set() or self._stop_workers:
+    def _hydrate_indices_tabix(self, indices: Sequence[int]) -> List[int]:
+        """Hydrate exact global row indices via compact Tabix/CSI region clusters."""
+        if not self.samples or not indices or self._stop_event.is_set() or self._stop_workers:
             return []
 
         with self._site_lock:
-            end_idx = min(len(self._site_records), start_idx + count)
-            missing = [i for i in range(start_idx, end_idx) if not self._sample_cache.contains(i)]
+            n_sites = len(self._site_records)
+            missing = sorted({
+                int(i) for i in indices
+                if 0 <= int(i) < n_sites and not self._sample_cache.contains(int(i))
+            })
             if not missing:
                 return []
             target_sites = [(i, self._site_records[i]) for i in missing]
 
         hydrated: List[int] = []
+        if not self.has_tabix:
+            return hydrated
 
-        # Fast path 1: Tabix / CSI region query via cyvcf2 Handle 2
-        if self.has_tabix and target_sites:
-            tabix_vcf = None
-            try:
-                tabix_vcf = cyvcf2.VCF(self.filepath)
-                by_chrom: Dict[str, List[Tuple[int, Any]]] = {}
-                for i, srec in target_sites:
-                    by_chrom.setdefault(srec.chrom, []).append((i, srec))
+        tabix_vcf = None
+        try:
+            tabix_vcf = cyvcf2.VCF(self.filepath)
+            by_chrom: Dict[str, List[Tuple[int, Any]]] = {}
+            for i, srec in target_sites:
+                by_chrom.setdefault(srec.chrom, []).append((i, srec))
 
-                for chrom, items in by_chrom.items():
+            for chrom, items in by_chrom.items():
+                if self._stop_event.is_set() or self._stop_workers:
+                    break
+                items.sort(key=lambda pair: (pair[1].pos, pair[0]))
+
+                # Split sparse filtered hits into tight Tabix windows (<= 10kb gap, <= 50kb span)
+                clusters: List[List[Tuple[int, Any]]] = []
+                cur_cluster: List[Tuple[int, Any]] = []
+                for pair in items:
+                    if not cur_cluster:
+                        cur_cluster.append(pair)
+                    else:
+                        gap = pair[1].pos - cur_cluster[-1][1].pos
+                        span = pair[1].pos - cur_cluster[0][1].pos
+                        if gap <= 10000 and span <= 50000:
+                            cur_cluster.append(pair)
+                        else:
+                            clusters.append(cur_cluster)
+                            cur_cluster = [pair]
+                if cur_cluster:
+                    clusters.append(cur_cluster)
+
+                for cluster in clusters:
                     if self._stop_event.is_set() or self._stop_workers:
                         break
-                    min_pos = min(s.pos for _, s in items)
-                    max_pos = max(s.pos for _, s in items)
+                    min_pos = cluster[0][1].pos
+                    max_pos = cluster[-1][1].pos
                     lookup: Dict[Tuple[int, str, str], List[int]] = {}
-                    for i, s in items:
-                        key = (s.pos, s.ref, s.alt_str)
-                        lookup.setdefault(key, []).append(i)
+                    for i, s in cluster:
+                        lookup.setdefault((s.pos, s.ref, s.alt_str), []).append(i)
 
                     for v in tabix_vcf(f"{chrom}:{min_pos}-{max_pos}"):
                         if self._stop_event.is_set() or self._stop_workers:
@@ -609,79 +636,160 @@ class VcfReader:
                             for row_i in lookup[k]:
                                 self._sample_cache.put(row_i, payload)
                                 hydrated.append(row_i)
-                if len(hydrated) == len(missing) or self._stop_event.is_set() or self._stop_workers:
-                    return hydrated
-            except Exception:
-                pass
-            finally:
-                if tabix_vcf is not None:
-                    try:
-                        tabix_vcf.close()
-                    except Exception:
-                        pass
-
-        # Fast path 2: Bounded sequential cyvcf2 scan up to last missing index
-        remaining = [i for i in missing if not self._sample_cache.contains(i)]
-        if remaining and not self._stop_event.is_set() and not self._stop_workers:
-            last_i = remaining[-1]
-            needed_set = set(remaining)
-            vcf2 = None
-            try:
-                vcf2 = cyvcf2.VCF(self.filepath)
-                for idx, v in enumerate(vcf2):
-                    if idx > last_i or self._stop_event.is_set() or self._stop_workers:
-                        break
-                    if idx in needed_set:
-                        payload = _sample_payload_from_cyvcf2(v, self.samples)
-                        self._sample_cache.put(idx, payload)
-                        hydrated.append(idx)
-            except Exception:
-                pass
-            finally:
-                if vcf2 is not None:
-                    try:
-                        vcf2.close()
-                    except Exception:
-                        pass
-
+        except Exception:
+            pass
+        finally:
+            if tabix_vcf is not None:
+                try:
+                    tabix_vcf.close()
+                except Exception:
+                    pass
         return hydrated
 
+    def _hydrate_window_sync(self, start_idx: int, count: int) -> List[int]:
+        """Hydrate sample payloads for [start_idx, start_idx + count) via cyvcf2 Handle 2."""
+        if not self.samples or count <= 0 or self._stop_event.is_set() or self._stop_workers:
+            return []
+
+        with self._site_lock:
+            end_idx = min(len(self._site_records), start_idx + count)
+            missing = [i for i in range(start_idx, end_idx) if not self._sample_cache.contains(i)]
+            if not missing:
+                return []
+
+        if self.has_tabix:
+            return self._hydrate_indices_tabix(missing)
+
+        # Unindexed (<= 100 MB): bounded scan up to last missing index when called synchronously
+        hydrated: List[int] = []
+        last_i = missing[-1]
+        needed_set = set(missing)
+        vcf2 = None
+        try:
+            vcf2 = cyvcf2.VCF(self.filepath)
+            for idx, v in enumerate(vcf2):
+                if idx > last_i or self._stop_event.is_set() or self._stop_workers:
+                    break
+                if idx in needed_set and not self._sample_cache.contains(idx):
+                    payload = _sample_payload_from_cyvcf2(v, self.samples)
+                    self._sample_cache.put(idx, payload)
+                    hydrated.append(idx)
+        except Exception:
+            pass
+        finally:
+            if vcf2 is not None:
+                try:
+                    vcf2.close()
+                except Exception:
+                    pass
+        return hydrated
+
+    def _run_unindexed_single_pass(self) -> None:
+        """
+        Single-pass Handle 2 worker for allowed unindexed VCFs (<= 100 MB):
+        Streams all variant rows once sequentially into an eviction-free cache,
+        emitting incremental hydration batches so visible rows auto-repaint quickly.
+        """
+        vcf2 = None
+        batch: List[int] = []
+        last_emit_t = time.monotonic()
+        seen_version = -1
+        prio_snapshot: Set[int] = set()
+        try:
+            vcf2 = cyvcf2.VCF(self.filepath)
+            for idx, v in enumerate(vcf2):
+                if self._stop_event.is_set() or self._stop_workers:
+                    break
+                if not self._sample_cache.contains(idx):
+                    payload = _sample_payload_from_cyvcf2(v, self.samples)
+                    self._sample_cache.put(idx, payload)
+                batch.append(idx)
+
+                if seen_version != self._priority_version:
+                    with self._sample_cond:
+                        seen_version = self._priority_version
+                        prio_snapshot = set(self._priority_indices)
+
+                is_prio = idx in prio_snapshot
+                now = time.monotonic()
+                should_flush = (
+                    len(batch) >= 150
+                    or (is_prio and (len(batch) >= 25 or (now - last_emit_t) >= 0.02))
+                    or (batch and (now - last_emit_t) >= 0.06)
+                )
+                if should_flush:
+                    emit_list = list(batch)
+                    batch.clear()
+                    last_emit_t = now
+                    self._emit_hydration(emit_list)
+            if batch and not self._stop_event.is_set() and not self._stop_workers:
+                self._emit_hydration(list(batch))
+        except (FileNotFoundError, OSError):
+            pass
+        except Exception:
+            pass
+        finally:
+            self._unindexed_pass_done = True
+            if vcf2 is not None:
+                try:
+                    vcf2.close()
+                except Exception:
+                    pass
+
     def _start_sample_hydration_worker(self) -> None:
-        """Viewport-only Handle 2 background worker coalescing scroll hydration requests."""
-        def _worker():
+        """Start Handle 2 worker: Tabix exact-index lookup if indexed, else single-pass full cache."""
+        if not self.has_tabix:
+            self._sample_thread = threading.Thread(
+                target=self._run_unindexed_single_pass, daemon=True
+            )
+            self._sample_thread.start()
+            return
+
+        def _indexed_worker():
             while not self._stop_event.is_set() and not self._stop_workers:
-                req: Optional[Tuple[int, int]] = None
+                req_indices: Optional[List[int]] = None
                 with self._sample_cond:
                     while (
-                        self._priority_window is None
+                        self._pending_indices is None
                         and not self._stop_event.is_set()
                         and not self._stop_workers
                     ):
                         self._sample_cond.wait(timeout=0.25)
                     if self._stop_event.is_set() or self._stop_workers:
                         break
-                    req = self._priority_window
-                    self._priority_window = None
+                    req_indices = self._pending_indices
+                    self._pending_indices = None
 
-                if req is not None:
-                    p_start, p_count = req
+                if req_indices:
                     try:
-                        hydrated = self._hydrate_window_sync(p_start, p_count)
+                        hydrated = self._hydrate_indices_tabix(req_indices)
                     except (FileNotFoundError, OSError):
                         break
                     if hydrated and not self._stop_event.is_set() and not self._stop_workers:
                         self._emit_hydration(hydrated)
 
-        self._sample_thread = threading.Thread(target=_worker, daemon=True)
+        self._sample_thread = threading.Thread(target=_indexed_worker, daemon=True)
         self._sample_thread.start()
 
-    def request_sample_hydration(self, offset: int, limit: int = 100) -> None:
-        """Schedule viewport-scoped sample hydration, coalescing superseded scroll requests."""
-        if not self.samples or limit <= 0 or self._stop_event.is_set() or self._stop_workers:
+    def request_sample_indices(self, indices: Sequence[int]) -> None:
+        """Schedule viewport hydration for exact global row indices, coalescing superseded scrolls."""
+        if not self.samples or self._stop_event.is_set() or self._stop_workers:
+            return
+        missing = [int(i) for i in indices if int(i) >= 0 and not self._sample_cache.contains(int(i))]
+        if not missing:
             return
         with self._sample_cond:
-            self._priority_window = (max(0, offset), limit)
+            self._priority_indices = set(missing)
+            self._priority_version += 1
+            self._pending_indices = missing
             self._sample_cond.notify_all()
+
+    def request_sample_hydration(self, offset: int, limit: int = 100) -> None:
+        """Schedule viewport-scoped sample hydration for [offset, offset + limit)."""
+        if not self.samples or limit <= 0 or self._stop_event.is_set() or self._stop_workers:
+            return
+        start = max(0, int(offset))
+        self.request_sample_indices(range(start, start + int(limit)))
 
     def set_focus_row(self, row_idx: int) -> None:
         """Track active cursor row."""
@@ -1012,7 +1120,8 @@ class VcfReader:
         self._count_callbacks.clear()
         self._hydration_callbacks.clear()
         with self._sample_cond:
-            self._priority_window = None
+            self._pending_indices = None
+            self._priority_indices.clear()
             self._sample_cond.notify_all()
         if not wait:
             return

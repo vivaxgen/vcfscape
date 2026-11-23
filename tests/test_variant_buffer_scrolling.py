@@ -103,14 +103,18 @@ class TestVariantBufferScrolling(unittest.TestCase):
                 self.streamed_until = 150
                 self.total_variants_ready = False
                 self.samples = ["S1"]
+                self.requested_index_batches = []
             def get_site_slice(self, offset=0, limit=None):
                 end = self.streamed_until if limit is None else min(self.streamed_until, offset + limit)
                 return self._sites[offset:end]
+            def request_sample_indices(self, indices):
+                self.requested_index_batches.append(list(indices))
             def get_hydrated_record(self, row_idx):
                 s = self._sites[row_idx]
                 rec = s.to_variant_record()
-                rec.sample_data = {"S1": {"GT": "0/1", "DP": "25"}}
-                rec.samples_loaded = True
+                if row_idx == 0:
+                    rec.sample_data = {"S1": {"GT": "0/1", "DP": "25"}}
+                    rec.samples_loaded = True
                 return rec
             def get_total_variants_async(self):
                 return len(self._sites) if self.total_variants_ready else None
@@ -130,11 +134,14 @@ class TestVariantBufferScrolling(unittest.TestCase):
         self.assertLessEqual(sv.sample_table.row_count, 25)
 
         # Direct in-memory INDEL filter on FixedArrowBuffer
+        reader.requested_index_batches.clear()
         matched = sv.apply_filter(variant_type="INDEL")
         self.assertEqual(matched, 100)
         self.assertEqual(sv.fixed_table.row_count, 100)
         self.assertLessEqual(sv.sample_table.row_count, 25)
         self.assertEqual(sv.records[0].var_id, "site_0")
+        self.assertTrue(reader.requested_index_batches)
+        self.assertTrue(all(idx % 4 == 0 for idx in reader.requested_index_batches[-1]))
 
         # Direct region jump lookup on FixedArrowBuffer finds Pfcrt K76T site at row 50
         self.assertTrue(sv.apply_filter(variant_type="ALL") == 400)

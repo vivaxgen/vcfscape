@@ -294,6 +294,54 @@ class TestVcfscapeAsyncPilot(unittest.IsolatedAsyncioTestCase):
             if os.path.exists(gz_path):
                 os.remove(gz_path)
 
+    async def test_lazy_hydration_auto_redraws_without_scroll(self):
+        """Verify SampleMatrixTable automatically repaints '...' to genotypes without needing an extra scroll."""
+        import asyncio
+        import time
+
+        with tempfile.NamedTemporaryFile(suffix=".vcf.gz", delete=False) as tf:
+            gz_path = tf.name
+
+        try:
+            samples = [f"S_{i:02d}" for i in range(10)]
+            header = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples) + "\n"
+            calls = "\t".join(["0/1:30" for _ in samples])
+            with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+                f.write("##fileformat=VCFv4.2\n")
+                f.write("##contig=<ID=Pf3D7_07_v3,length=1445207>\n")
+                f.write("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n")
+                f.write("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n")
+                f.write(header)
+                for i in range(900):
+                    f.write(
+                        f"Pf3D7_07_v3\t{1000 + i * 10}\tvar_{i}\tA\tT\t99\tPASS\t.\tGT:DP\t{calls}\n"
+                    )
+
+            app = VcfscapeApp(gz_path)
+            async with app.run_test(size=(120, 36)) as pilot:
+                await pilot.pause()
+
+                # Scroll deep once, then DO NOT scroll again — wait for background Handle 2 auto-repaint
+                await pilot.press("pagedown", "pagedown", "pagedown")
+                deadline = time.monotonic() + 4.0
+                while time.monotonic() < deadline:
+                    await pilot.pause()
+                    line_txt = app.table_widget.sample_table.render_line(1).text
+                    if "0/1" in line_txt and "..." not in line_txt:
+                        break
+                    await asyncio.sleep(0.02)
+
+                rendered = app.table_widget.sample_table.render_line(1).text
+                self.assertIn("0/1", rendered)
+                self.assertNotIn("...", rendered)
+
+                await pilot.press("q")
+                await pilot.pause()
+            self.assertFalse(app.is_running)
+        finally:
+            if os.path.exists(gz_path):
+                os.remove(gz_path)
+
 
 class TestWidgetFilesPresence(unittest.TestCase):
     """Verifies that all widget files and assets exist and compile without syntax errors."""

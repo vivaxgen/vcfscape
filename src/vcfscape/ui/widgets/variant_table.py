@@ -1266,11 +1266,13 @@ class VariantSplitView(Horizontal):
             and self.reader is not None
             and self.samples
             and self._subset_records is None
-            and hasattr(self.reader, "request_sample_hydration")
         ):
-            req_start = min(unhydrated_global_indices)
-            req_span = max(unhydrated_global_indices) - req_start + 1
-            self.reader.request_sample_hydration(req_start, req_span)
+            if hasattr(self.reader, "request_sample_indices"):
+                self.reader.request_sample_indices(unhydrated_global_indices)
+            elif hasattr(self.reader, "request_sample_hydration"):
+                req_start = min(unhydrated_global_indices)
+                req_span = max(unhydrated_global_indices) - req_start + 1
+                self.reader.request_sample_hydration(req_start, req_span)
 
     def _command_tables_scroll_y(self, target_y: int) -> None:
         """Align FixedVariantTable scroll_y and SampleMatrixTable fixed viewport window to target_y."""
@@ -1291,17 +1293,18 @@ class VariantSplitView(Horizontal):
         """Ask Handle 2 to hydrate only global rows mapped to the visible viewport."""
         if not self.reader or not self.samples or self._subset_records is not None:
             return
-        if not hasattr(self.reader, "request_sample_hydration"):
-            return
         missing_global = [
             self._sample_window_global_indices[i]
             for i, rec in enumerate(self.records)
             if i < len(self._sample_window_global_indices) and not getattr(rec, "samples_loaded", True)
         ]
         if missing_global:
-            req_start = min(missing_global)
-            req_span = max(missing_global) - req_start + 1
-            self.reader.request_sample_hydration(req_start, req_span)
+            if hasattr(self.reader, "request_sample_indices"):
+                self.reader.request_sample_indices(missing_global)
+            elif hasattr(self.reader, "request_sample_hydration"):
+                req_start = min(missing_global)
+                req_span = max(missing_global) - req_start + 1
+                self.reader.request_sample_hydration(req_start, req_span)
 
     # --- Top-Widget Keyboard & Mouse Wheel Capture ---
 
@@ -1586,7 +1589,7 @@ class VariantSplitView(Horizontal):
         try:
             if getattr(self.app, "_vcfscape_closing", False):
                 return
-        except Exception:
+        except LookupError:
             pass
         if not hasattr(self.reader, "get_hydrated_record"):
             return
@@ -1620,17 +1623,11 @@ class VariantSplitView(Horizontal):
         if hydrated_local_map:
             if self.sample_buffer.hydrate_rows(list(hydrated_local_map.keys()), hydrated_local_map):
                 _clear_table_render_caches(self.sample_table)
-                try:
-                    self.sample_table.refresh()
-                except Exception:
-                    pass
+                self.sample_table.refresh()
 
         if fixed_meta_changed:
             _clear_table_render_caches(self.fixed_table)
-            try:
-                self.fixed_table.refresh()
-            except Exception:
-                pass
+            self.fixed_table.refresh()
 
         if updated_current and not self._split_view_closing:
             self._last_notified = None

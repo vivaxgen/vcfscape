@@ -3,14 +3,16 @@ Main Textual Application for VCFscape - VCF inspector part of vivaxGEN Project.
 """
 
 import asyncio
+import contextvars
 import os
 import signal
 import threading
-from typing import Optional, List, Set
+from typing import Optional, List
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.binding import Binding
+from textual.message import Message
 
 from vcfscape.core.vcf_reader import VcfReader
 from vcfscape.core.cohorts import CohortManager
@@ -21,6 +23,30 @@ from vcfscape.ui.widgets.cohort_stats_pane import CohortStatsPane
 from vcfscape.ui.widgets.footer_bar import FooterBar
 from vcfscape.ui.screens.cohort_manager_screen import CohortManagerScreen
 from vcfscape.ui.screens.jump_region_screen import JumpRegionScreen
+
+
+class SamplesHydrated(Message):
+    """Posted when Handle 2 finishes hydrating sample rows in the background."""
+
+    def __init__(self, indices: List[int]) -> None:
+        super().__init__()
+        self.indices = indices
+
+
+class IndexingProgress(Message):
+    """Posted when Handle 1 streams additional site rows."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+
+
+class TotalVariantsReady(Message):
+    """Posted when Handle 1 completes background variant counting."""
+
+    def __init__(self, total: int) -> None:
+        super().__init__()
+        self.total = total
 
 
 class VcfscapeApp(App):
@@ -61,9 +87,8 @@ class VcfscapeApp(App):
         self.current_filter = "ALL"  # "ALL", "DRUG_RESISTANT", "INDEL", "SNP"
         self._vcfscape_closing = False
         self._callbacks_hooked = False
-        self._pending_hydrated_indices: Set[int] = set()
-        self._hydration_timer: Optional[object] = None
         self._ui_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ui_context: Optional[contextvars.Context] = None
 
         provisional_variants = self.reader.get_total_variants_async()
         self.header_bar = HeaderBar(
@@ -110,6 +135,7 @@ class VcfscapeApp(App):
             self._ui_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._ui_loop = None
+        self._ui_context = contextvars.copy_context()
 
         self._hook_reader_callbacks()
         try:
@@ -118,16 +144,24 @@ class VcfscapeApp(App):
             pass
 
         if hasattr(self.table_widget, "hydrate_rows") and self.table_widget.records:
-            buf = getattr(self.table_widget, "sample_buffer", None)
-            if buf is not None and hasattr(buf, "is_row_hydrated"):
-                pending = [
-                    i for i in range(len(self.table_widget.records))
-                    if not buf.is_row_hydrated(i)
-                ]
-            else:
+            window_indices = getattr(self.table_widget, "_sample_window_global_indices", None)
+            if window_indices is None:
                 pending = list(range(len(self.table_widget.records)))
+            else:
+                pending = [
+                    window_indices[i]
+                    for i in range(len(self.table_widget.records))
+                    if i < len(window_indices)
+                    and not getattr(self.table_widget.records[i], "samples_loaded", True)
+                ]
             if pending:
                 self.table_widget.hydrate_rows(pending)
+            if (
+                getattr(self.reader, "samples", None)
+                and hasattr(self.reader, "request_sample_hydration")
+                and not getattr(self.reader, "_unindexed_pass_done", False)
+            ):
+                self.reader.request_sample_hydration(0, 150)
 
         if self.reader.total_variants_ready:
             total = self.reader.get_total_variants_async()
@@ -137,18 +171,8 @@ class VcfscapeApp(App):
         else:
             self.footer_bar.set_log("Indexing variants in background...")
 
-    def _stop_hydration_timer(self) -> None:
-        if self._hydration_timer is not None:
-            try:
-                self._hydration_timer.stop()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            self._hydration_timer = None
-        self._pending_hydrated_indices.clear()
-
     def _begin_shutdown(self) -> None:
         self._vcfscape_closing = True
-        self._stop_hydration_timer()
         if hasattr(self, "table_widget") and hasattr(self.table_widget, "stop_timers"):
             try:
                 self.table_widget.stop_timers()
@@ -210,60 +234,52 @@ class VcfscapeApp(App):
                 or not getattr(self, "is_running", False)
             ):
                 return
+            fn(*args)
+
+        if threading.get_ident() == getattr(self, "_thread_id", None):
+            _guarded_call()
+            return
+
+        loop = self._ui_loop or getattr(self, "_loop", None)
+        if loop is not None and loop.is_running() and not loop.is_closed():
             try:
-                fn(*args)
-            except Exception:
+                if self._ui_context is not None:
+                    loop.call_soon_threadsafe(_guarded_call, context=self._ui_context)
+                else:
+                    loop.call_soon_threadsafe(_guarded_call)
+            except RuntimeError:
                 pass
 
-        try:
-            if threading.get_ident() == getattr(self, "_thread_id", None):
-                _guarded_call()
-            else:
-                loop = self._ui_loop or getattr(self, "_loop", None)
-                if loop is not None and loop.is_running() and not loop.is_closed():
-                    loop.call_soon_threadsafe(_guarded_call)
-        except Exception:
-            pass
-
     def _on_samples_hydrated(self, indices: List[int]) -> None:
-        self._invoke_on_ui(self._apply_samples_hydrated, indices)
-
-    def _apply_samples_hydrated(self, indices: List[int]) -> None:
-        if self._vcfscape_closing or not indices:
+        if not indices:
             return
-        self._pending_hydrated_indices.update(indices)
-        if self._hydration_timer is None:
-            try:
-                self._hydration_timer = self.set_timer(0.05, self._flush_hydrated_rows)
-            except Exception:
-                self._flush_hydrated_rows()
+        self._invoke_on_ui(self.post_message, SamplesHydrated(list(indices)))
 
-    def _flush_hydrated_rows(self) -> None:
-        self._hydration_timer = None
-        if self._vcfscape_closing or not self._pending_hydrated_indices:
+    def on_samples_hydrated(self, event: SamplesHydrated) -> None:
+        if self._vcfscape_closing or not event.indices:
             return
-        batch = sorted(self._pending_hydrated_indices)
-        self._pending_hydrated_indices.clear()
         if hasattr(self, "table_widget") and hasattr(self.table_widget, "hydrate_rows"):
-            self.table_widget.hydrate_rows(batch)
+            self.table_widget.hydrate_rows(event.indices)
 
     def _on_progress_update(self, count: int) -> None:
-        self._invoke_on_ui(self._apply_progress_update, count)
+        self._invoke_on_ui(self.post_message, IndexingProgress(count))
 
-    def _apply_progress_update(self, count: int) -> None:
+    def on_indexing_progress(self, event: IndexingProgress) -> None:
         if self._vcfscape_closing:
             return
+        count = event.count
         self.header_bar.counting_progress = count
         if hasattr(self.table_widget, "update_counting_progress"):
             self.table_widget.update_counting_progress(count)
         self.footer_bar.set_log(f"Indexing variants in background: {count:,} sites...")
 
     def _on_total_variants_ready(self, total: int) -> None:
-        self._invoke_on_ui(self._apply_total_variants, total)
+        self._invoke_on_ui(self.post_message, TotalVariantsReady(total))
 
-    def _apply_total_variants(self, total: int) -> None:
+    def on_total_variants_ready(self, event: TotalVariantsReady) -> None:
         if self._vcfscape_closing:
             return
+        total = event.total
         self.header_bar.counting_progress = total
         self.header_bar.total_variants = total
         self.table_widget.update_total_variants(total)

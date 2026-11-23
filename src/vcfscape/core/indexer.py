@@ -8,9 +8,9 @@ from typing import Any, Optional
 
 
 class RecordLruCache:
-    """Thread-safe and fast in-memory LRU cache for parsed sample payload objects."""
+    """Thread-safe in-memory cache for parsed sample payload objects (bounded LRU or unbounded)."""
 
-    def __init__(self, maxsize: int = 3000):
+    def __init__(self, maxsize: Optional[int] = 3000):
         self.maxsize = maxsize
         self._cache: OrderedDict[int, Any] = OrderedDict()
         self._lock = threading.RLock()
@@ -22,16 +22,18 @@ class RecordLruCache:
     def get(self, key: int) -> Optional[Any]:
         with self._lock:
             if key in self._cache:
-                self._cache.move_to_end(key)
+                if self.maxsize is not None:
+                    self._cache.move_to_end(key)
                 return self._cache[key]
             return None
 
     def put(self, key: int, val: Any) -> None:
         with self._lock:
             if key in self._cache:
-                self._cache.move_to_end(key)
+                if self.maxsize is not None:
+                    self._cache.move_to_end(key)
             else:
-                if len(self._cache) >= self.maxsize:
+                if self.maxsize is not None and len(self._cache) >= self.maxsize:
                     self._cache.popitem(last=False)
             self._cache[key] = val
 
