@@ -29,6 +29,11 @@ except ImportError:
     from textual.widgets import ScrollView  # type: ignore
 
 try:
+    from textual._context import NoActiveAppError
+except ImportError:
+    NoActiveAppError = LookupError  # type: ignore
+
+try:
     from textual_fastdatatable import ArrowBackend
 except ImportError:
     try:
@@ -1586,11 +1591,12 @@ class VariantSplitView(Horizontal):
         """
         if self._split_view_closing or not self.reader or self._subset_records is not None:
             return
-        try:
-            if getattr(self.app, "_vcfscape_closing", False):
-                return
-        except LookupError:
-            pass
+        if getattr(self, "is_attached", False):
+            try:
+                if getattr(self.app, "_vcfscape_closing", False):
+                    return
+            except (NoActiveAppError, LookupError):
+                pass
         if not hasattr(self.reader, "get_hydrated_record"):
             return
 

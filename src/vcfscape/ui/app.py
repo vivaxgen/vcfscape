@@ -125,10 +125,10 @@ class VcfscapeApp(App):
             return
         self._callbacks_hooked = True
         if hasattr(self.reader, "add_hydration_callback"):
-            self.reader.add_hydration_callback(self._on_samples_hydrated)
+            self.reader.add_hydration_callback(self._handle_reader_samples_hydrated)
         if not self.reader.total_variants_ready:
-            self.reader.add_progress_callback(self._on_progress_update)
-            self.reader.add_total_variants_callback(self._on_total_variants_ready)
+            self.reader.add_progress_callback(self._handle_reader_progress_update)
+            self.reader.add_total_variants_callback(self._handle_reader_total_variants_ready)
 
     def on_mount(self) -> None:
         try:
@@ -250,7 +250,7 @@ class VcfscapeApp(App):
             except RuntimeError:
                 pass
 
-    def _on_samples_hydrated(self, indices: List[int]) -> None:
+    def _handle_reader_samples_hydrated(self, indices: List[int]) -> None:
         if not indices:
             return
         self._invoke_on_ui(self.post_message, SamplesHydrated(list(indices)))
@@ -261,7 +261,7 @@ class VcfscapeApp(App):
         if hasattr(self, "table_widget") and hasattr(self.table_widget, "hydrate_rows"):
             self.table_widget.hydrate_rows(event.indices)
 
-    def _on_progress_update(self, count: int) -> None:
+    def _handle_reader_progress_update(self, count: int) -> None:
         self._invoke_on_ui(self.post_message, IndexingProgress(count))
 
     def on_indexing_progress(self, event: IndexingProgress) -> None:
@@ -273,7 +273,7 @@ class VcfscapeApp(App):
             self.table_widget.update_counting_progress(count)
         self.footer_bar.set_log(f"Indexing variants in background: {count:,} sites...")
 
-    def _on_total_variants_ready(self, total: int) -> None:
+    def _handle_reader_total_variants_ready(self, total: int) -> None:
         self._invoke_on_ui(self.post_message, TotalVariantsReady(total))
 
     def on_total_variants_ready(self, event: TotalVariantsReady) -> None:
